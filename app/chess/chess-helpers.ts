@@ -13,6 +13,8 @@ export type BoardSnapshot = {
   history: string[]
   statusText: string
   checkSquare: string | null
+  turn: PlayerColor
+  isGameOver: boolean
 }
 // A coached move suggestion drawn as a colored arrow, with an optional reason shown in the panel below the board.
 export type CoachSuggestion = {
@@ -70,7 +72,9 @@ export function snapshotOf(chess: Chess): BoardSnapshot {
     fen: chess.fen(),
     history: chess.history(),
     statusText: describeStatus(chess),
-    checkSquare: findCheckedKingSquare(chess)
+    checkSquare: findCheckedKingSquare(chess),
+    turn: chess.turn(),
+    isGameOver: chess.isGameOver()
   }
 }
 

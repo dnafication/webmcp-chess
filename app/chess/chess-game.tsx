@@ -7,7 +7,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties
+  type CSSProperties,
+  type RefObject
 } from 'react'
 import { Chess, type Square } from 'chess.js'
 import {
@@ -24,6 +25,7 @@ import {
   asPlayerColor,
   createGame,
   loadStoredState,
+  opponentColor,
   snapshotOf,
   type BoardSnapshot,
   type CoachSuggestion,
@@ -51,8 +53,37 @@ const CHECK_SQUARE_STYLE: CSSProperties = {
     'radial-gradient(circle, rgba(220,38,38,0.85) 0%, rgba(220,38,38,0.35) 55%, transparent 75%)',
   animation: 'check-square-pulse 1.1s ease-in-out infinite'
 }
+// Resting shadow so pieces read as sitting on the board rather than printed onto it.
+const PIECE_SHADOW_STYLE: CSSProperties = {
+  filter: 'drop-shadow(0 2px 3px rgba(0,0,0,0.35))'
+}
+// A deeper, more diffuse shadow while a piece is lifted in a drag.
+const DRAGGING_PIECE_SHADOW = 'drop-shadow(0 10px 14px rgba(0,0,0,0.45))'
 
 const DEFAULT_STORED_STATE: StoredState = { pgn: '', humanColor: 'w' }
+
+// What a first-time visitor can paste into an agent that can see this page.
+const EXAMPLE_AGENT_PROMPT =
+  'Play chess with me as Black. Use WebMCP to inspect the board, wait for my move, then make a legal Black move. Repeat each turn.'
+
+// Shared between the click and drag rejection paths so the wording can't drift between them.
+const MOVE_REJECTED_GAME_OVER = 'The game is already over.'
+const MOVE_REJECTED_NOT_YOUR_TURN =
+  "It isn't your turn yet — waiting for the agent to move."
+const MOVE_REJECTED_ILLEGAL_TARGET = "That's not a legal move for this piece."
+
+// Clears a pending timeout (if any), runs `reset` after `ms`, and tracks the new timeout in `ref`.
+function scheduleReset(
+  ref: RefObject<number | null>,
+  reset: () => void,
+  ms: number
+) {
+  if (ref.current !== null) window.clearTimeout(ref.current)
+  ref.current = window.setTimeout(() => {
+    ref.current = null
+    reset()
+  }, ms)
+}
 
 export default function ChessGame() {
   const [game] = useState(() => createGame(DEFAULT_STORED_STATE))
@@ -78,6 +109,10 @@ export default function ChessGame() {
   const [agentWaitStatus, setAgentWaitStatus] = useState<
     'idle' | 'waiting' | 'timed-out'
   >('idle')
+  const [moveFeedback, setMoveFeedback] = useState<string | null>(null)
+  const moveFeedbackTimeoutRef = useRef<number | null>(null)
+  const [promptCopied, setPromptCopied] = useState(false)
+  const promptCopiedTimeoutRef = useRef<number | null>(null)
   const gameEventListenersRef = useRef(
     new Set<(event: 'human-move' | 'reset') => void>()
   )
@@ -124,6 +159,47 @@ export default function ChessGame() {
     setMoveOptionSquares({})
   }, [])
 
+  const clearMoveFeedback = useCallback(() => {
+    if (moveFeedbackTimeoutRef.current !== null) {
+      window.clearTimeout(moveFeedbackTimeoutRef.current)
+      moveFeedbackTimeoutRef.current = null
+    }
+    setMoveFeedback(null)
+  }, [])
+
+  // Briefly explains why an attempted move was rejected, then self-dismisses —
+  // the human-facing counterpart to the specific rejection reasons already
+  // given to the agent in use-chess-webmcp-tools.ts.
+  const flashMoveFeedback = useCallback((message: string) => {
+    setMoveFeedback(message)
+    scheduleReset(moveFeedbackTimeoutRef, () => setMoveFeedback(null), 2400)
+  }, [])
+
+  useEffect(() => {
+    // These refs hold plain timeout ids, not DOM nodes, so reading .current at
+    // unmount (rather than a value captured at effect-setup time) is correct.
+    return () => {
+      if (moveFeedbackTimeoutRef.current !== null) {
+        window.clearTimeout(moveFeedbackTimeoutRef.current)
+      }
+      if (promptCopiedTimeoutRef.current !== null) {
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        window.clearTimeout(promptCopiedTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  const handleCopyPrompt = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(EXAMPLE_AGENT_PROMPT)
+    } catch {
+      // Clipboard access denied or unavailable; the prompt text stays selectable by hand.
+      return
+    }
+    setPromptCopied(true)
+    scheduleReset(promptCopiedTimeoutRef, () => setPromptCopied(false), 1600)
+  }, [])
+
   const clearCoach = useCallback(() => {
     setCoachSuggestions([])
     setCoachNote(null)
@@ -132,9 +208,10 @@ export default function ChessGame() {
   // Run after any successful move (human or agent) to keep the board, coach panel, and storage in sync.
   const completeMove = useCallback(() => {
     clearCoach()
+    clearMoveFeedback()
     refresh()
     persist()
-  }, [clearCoach, refresh, persist])
+  }, [clearCoach, clearMoveFeedback, refresh, persist])
 
   const completeHumanMove = useCallback(() => {
     completeMove()
@@ -162,7 +239,7 @@ export default function ChessGame() {
     (from: string, to: string, promotion?: PromotionPiece): MoveResult => {
       const chess = chessGameRef.current
       if (chess.isGameOver()) {
-        return { ok: false, reason: 'The game is already over.' }
+        return { ok: false, reason: MOVE_REJECTED_GAME_OVER }
       }
       try {
         const move = chess.move({ from, to, promotion: promotion ?? 'q' })
@@ -185,11 +262,12 @@ export default function ChessGame() {
       clearSelection()
       setPendingPromotion(null)
       clearCoach()
+      clearMoveFeedback()
       refresh()
       persist()
       gameEventListenersRef.current.forEach((listener) => listener('reset'))
     },
-    [clearSelection, clearCoach, refresh, persist]
+    [clearSelection, clearCoach, clearMoveFeedback, refresh, persist]
   )
 
   // Highlights legal destinations (bigger dot for captures) for the given square.
@@ -222,7 +300,22 @@ export default function ChessGame() {
     if (pendingPromotion) return
 
     if (!selectedSquare) {
-      if (piece && getMoveOptions(square)) setSelectedSquare(square)
+      if (!piece) return
+      const chess = chessGameRef.current
+      if (chess.isGameOver()) {
+        flashMoveFeedback(MOVE_REJECTED_GAME_OVER)
+        return
+      }
+      if (!freeForAll && chess.turn() !== humanColor) {
+        flashMoveFeedback(MOVE_REJECTED_NOT_YOUR_TURN)
+        return
+      }
+      if (getMoveOptions(square)) {
+        setSelectedSquare(square)
+        clearMoveFeedback()
+      } else {
+        flashMoveFeedback('This piece has no legal moves right now.')
+      }
       return
     }
 
@@ -240,7 +333,9 @@ export default function ChessGame() {
     if (matching.length === 0) {
       if (piece && getMoveOptions(square)) {
         setSelectedSquare(square)
+        clearMoveFeedback()
       } else {
+        flashMoveFeedback(MOVE_REJECTED_ILLEGAL_TARGET)
         clearSelection()
       }
       return
@@ -254,7 +349,11 @@ export default function ChessGame() {
 
     const result = applyMove(selectedSquare, square)
     clearSelection()
-    if (result.ok) completeHumanMove()
+    if (result.ok) {
+      completeHumanMove()
+    } else {
+      flashMoveFeedback(result.reason)
+    }
   }
 
   function handlePieceDrop({
@@ -264,15 +363,24 @@ export default function ChessGame() {
     clearSelection()
     if (!targetSquare) return false
     const chess = chessGameRef.current
-    if (chess.isGameOver() || (!freeForAll && chess.turn() !== humanColor))
+    if (chess.isGameOver()) {
+      flashMoveFeedback(MOVE_REJECTED_GAME_OVER)
       return false
+    }
+    if (!freeForAll && chess.turn() !== humanColor) {
+      flashMoveFeedback(MOVE_REJECTED_NOT_YOUR_TURN)
+      return false
+    }
 
     const candidates = chess.moves({
       square: sourceSquare as Square,
       verbose: true
     })
     const matching = candidates.filter((move) => move.to === targetSquare)
-    if (matching.length === 0) return false
+    if (matching.length === 0) {
+      flashMoveFeedback(MOVE_REJECTED_ILLEGAL_TARGET)
+      return false
+    }
 
     if (matching.some((move) => move.promotion)) {
       setPendingPromotion({ from: sourceSquare, to: targetSquare })
@@ -280,7 +388,10 @@ export default function ChessGame() {
     }
 
     const result = applyMove(sourceSquare, targetSquare)
-    if (!result.ok) return false
+    if (!result.ok) {
+      flashMoveFeedback(result.reason)
+      return false
+    }
     completeHumanMove()
     return true
   }
@@ -311,18 +422,29 @@ export default function ChessGame() {
     onWaitStatusChange: setAgentWaitStatus
   })
 
+  // True from the moment a human move (or a fresh game) hands the turn to the
+  // agent's color until chess-make-move actually lands — the app has no way to
+  // know the agent is "thinking" beyond this, so it shows exactly that gap.
+  const isAgentTurn =
+    status === 'ready' &&
+    !freeForAll &&
+    !snapshot.isGameOver &&
+    snapshot.turn === opponentColor(humanColor)
+
   const coachArrows = coachSuggestions.map((suggestion) => ({
     startSquare: suggestion.from,
     endSquare: suggestion.to,
     color: suggestion.color
   }))
 
-  // Wraps the king SVGs so the one currently in check plays a shake animation.
+  // Gives every piece a resting shadow, and wraps the king SVGs so the one
+  // currently in check plays a shake animation on top of it.
   const checkAwarePieces = useMemo<PieceRenderObject>(() => {
     const checkSquare = snapshot.checkSquare
-    function shakeableKing(pieceType: 'wK' | 'bK') {
-      const BaseKing = defaultPieces[pieceType]
-      return function ShakeableKing(props?: {
+    function withShadow(pieceType: string) {
+      const BasePiece = defaultPieces[pieceType]
+      const isKing = pieceType.endsWith('K')
+      return function ShadowedPiece(props?: {
         fill?: string
         square?: string
         svgStyle?: CSSProperties
@@ -332,21 +454,23 @@ export default function ChessGame() {
             style={{
               width: '100%',
               height: '100%',
-              ...(props?.square === checkSquare
+              ...PIECE_SHADOW_STYLE,
+              ...(isKing && props?.square === checkSquare
                 ? { animation: 'king-shake 0.5s ease-in-out' }
                 : {})
             }}
           >
-            <BaseKing {...props} />
+            <BasePiece {...props} />
           </div>
         )
       }
     }
-    return {
-      ...defaultPieces,
-      wK: shakeableKing('wK'),
-      bK: shakeableKing('bK')
-    }
+    return Object.fromEntries(
+      Object.keys(defaultPieces).map((pieceType) => [
+        pieceType,
+        withShadow(pieceType)
+      ])
+    )
   }, [snapshot.checkSquare])
 
   const checkSquareStyles: Record<string, CSSProperties> = snapshot.checkSquare
@@ -364,7 +488,11 @@ export default function ChessGame() {
     onPieceDrop: handlePieceDrop,
     onSquareClick: handleSquareClick,
     animationDurationInMs: 300,
-    draggingPieceStyle: { transform: 'scale(1.2)', rotate: '5deg' },
+    draggingPieceStyle: {
+      transform: 'scale(1.2)',
+      rotate: '5deg',
+      filter: DRAGGING_PIECE_SHADOW
+    },
     ...boardThemeOptions
   }
 
@@ -377,7 +505,7 @@ export default function ChessGame() {
   }
 
   return (
-    <div className="grid w-full gap-6 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start xl:gap-8">
+    <div className="grid w-full gap-6 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start xl:grid-cols-[minmax(0,1fr)_22rem] xl:gap-8 2xl:grid-cols-[minmax(0,1fr)_26rem]">
       <section className="min-w-0">
         <div className="mb-5 flex flex-col gap-4 rounded-lg border border-black/10 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-zinc-900 sm:flex-row sm:items-end sm:justify-between">
           <div className="flex flex-col gap-1.5">
@@ -417,20 +545,45 @@ export default function ChessGame() {
           </button>
         </div>
 
-        <div className="mb-3 flex min-h-8 flex-wrap items-center gap-3">
+        <div
+          className="mb-3 flex min-h-8 flex-wrap items-center gap-3"
+          aria-live="polite"
+        >
           <h2 className="text-lg font-semibold text-zinc-950 dark:text-zinc-50">
             {snapshot.statusText}
           </h2>
-          {agentWaitStatus !== 'idle' && (
-            <span className="rounded-full border border-emerald-700/25 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 dark:border-emerald-400/25 dark:bg-emerald-950 dark:text-emerald-300">
-              {agentWaitStatus === 'waiting'
-                ? 'Agent waiting for your move'
-                : 'Agent wait timed out'}
+          {isAgentTurn ? (
+            <span className="flex items-center gap-2 rounded-full border border-emerald-700/25 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 dark:border-emerald-400/25 dark:bg-emerald-950 dark:text-emerald-300">
+              Agent is thinking
+              <span className="flex items-center gap-0.5" aria-hidden="true">
+                <span className="agent-thinking-dot h-1 w-1 rounded-full bg-current [animation-delay:0ms]" />
+                <span className="agent-thinking-dot h-1 w-1 rounded-full bg-current [animation-delay:160ms]" />
+                <span className="agent-thinking-dot h-1 w-1 rounded-full bg-current [animation-delay:320ms]" />
+              </span>
             </span>
+          ) : (
+            agentWaitStatus !== 'idle' && (
+              <span className="rounded-full border border-emerald-700/25 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 dark:border-emerald-400/25 dark:bg-emerald-950 dark:text-emerald-300">
+                {agentWaitStatus === 'waiting'
+                  ? 'Agent waiting for your move'
+                  : 'Agent wait timed out'}
+              </span>
+            )
           )}
         </div>
 
-        <div className="relative mx-auto aspect-square w-full max-w-225 overflow-hidden rounded-lg">
+        <div className="mb-3 min-h-5">
+          {moveFeedback && (
+            <p
+              role="alert"
+              className="text-sm font-medium text-amber-700 dark:text-amber-400"
+            >
+              {moveFeedback}
+            </p>
+          )}
+        </div>
+
+        <div className="relative mx-auto aspect-square w-[min(100%,80vh)] overflow-hidden rounded-lg">
           <Chessboard options={boardOptions} />
           {pendingPromotion && (
             <div className="absolute inset-0 flex items-center justify-center bg-white/90 p-4 dark:bg-zinc-950/90">
@@ -464,6 +617,55 @@ export default function ChessGame() {
       </section>
 
       <aside className="flex min-w-0 flex-col gap-4">
+        <section className="flex flex-col gap-3 rounded-lg border border-black/10 bg-white p-5 text-sm shadow-sm dark:border-white/10 dark:bg-zinc-900">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="font-semibold text-zinc-950 dark:text-zinc-50">
+              WebMCP
+            </h2>
+            <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-600 dark:bg-emerald-400" />
+          </div>
+          <p className="leading-6 text-zinc-600 dark:text-zinc-400">
+            <StatusLabel status={status} />
+          </p>
+          {status === 'ready' && (
+            <div className="flex flex-col gap-2 rounded-md bg-emerald-50 p-3 dark:bg-emerald-950">
+              <p className="text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+                Try it
+              </p>
+              <p className="leading-5 text-emerald-800 dark:text-emerald-300">
+                Paste this to an agent:
+              </p>
+              <div className="flex items-start gap-2">
+                <blockquote className="flex-1 rounded-md border border-black/10 bg-white px-2.5 py-2 text-xs leading-5 text-zinc-700 dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-300">
+                  {EXAMPLE_AGENT_PROMPT}
+                </blockquote>
+                <button
+                  type="button"
+                  onClick={handleCopyPrompt}
+                  className="h-8 shrink-0 rounded-md border border-black/15 bg-white px-2.5 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 dark:border-white/15 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                >
+                  {promptCopied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="border-t border-black/10 pt-3 dark:border-white/10">
+            <h3 className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
+              Registered tools
+            </h3>
+            <ul className="mt-2 flex flex-wrap gap-1.5">
+              {TOOL_NAMES.map((name) => (
+                <li
+                  key={name}
+                  className="rounded-full border border-black/10 bg-zinc-50 px-2.5 py-1 font-mono text-xs text-zinc-600 dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-400"
+                >
+                  {name}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+
         {(coachNote || coachSuggestions.length > 0) && (
           <section className="flex flex-col gap-3 rounded-lg border border-black/10 bg-white p-5 text-sm shadow-sm dark:border-white/10 dark:bg-zinc-900">
             <h2 className="font-semibold text-zinc-950 dark:text-zinc-50">
@@ -516,26 +718,6 @@ export default function ChessGame() {
               ))}
             </ol>
           )}
-        </section>
-
-        <section className="flex flex-col gap-3 rounded-lg border border-black/10 bg-white p-5 text-sm shadow-sm dark:border-white/10 dark:bg-zinc-900">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="font-semibold text-zinc-950 dark:text-zinc-50">
-              WebMCP
-            </h2>
-            <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-600 dark:bg-emerald-400" />
-          </div>
-          <p className="leading-6 text-zinc-600 dark:text-zinc-400">
-            <StatusLabel status={status} />
-          </p>
-          <details className="border-t border-black/10 pt-3 dark:border-white/10">
-            <summary className="cursor-pointer text-xs font-semibold text-zinc-600 dark:text-zinc-300">
-              Registered tools
-            </summary>
-            <code className="mt-3 block wrap-break-word font-mono text-xs leading-5 text-zinc-500 dark:text-zinc-400">
-              {TOOL_NAMES.join(', ')}
-            </code>
-          </details>
         </section>
       </aside>
     </div>

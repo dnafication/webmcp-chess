@@ -1,4 +1,3 @@
-import Link from 'next/link'
 import ChessGame from './chess/chess-game'
 
 export default function Home() {
