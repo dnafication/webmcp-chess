@@ -21,9 +21,15 @@ import {
 export const TOOL_NAMES = [
   'chess-get-board-state',
   'chess-make-move',
+  'chess-wait-for-human-move',
   'chess-suggest-move',
   'chess-new-game'
 ] as const
+
+const HUMAN_MOVE_WAIT_TIMEOUT_MS = 120_000
+
+type WaitStatus = 'idle' | 'waiting' | 'timed-out'
+type GameEvent = 'human-move' | 'reset'
 
 type ChessWebMcpToolsOptions = {
   chessGameRef: RefObject<Chess>
@@ -36,6 +42,37 @@ type ChessWebMcpToolsOptions = {
   startNewGame: (nextHumanColor?: PlayerColor) => void
   onAgentMove: () => void
   onSuggestion: (suggestions: CoachSuggestion[], note: string | null) => void
+  subscribeToGameEvent: (listener: (event: GameEvent) => void) => () => void
+  onWaitStatusChange: (status: WaitStatus) => void
+}
+
+function agentState(chess: Chess, humanColor: PlayerColor) {
+  const agentColor = opponentColor(humanColor)
+  return {
+    fen: chess.fen(),
+    turn: chess.turn(),
+    humanColor,
+    agentColor,
+    legalMoves: chess.moves(),
+    history: chess.history(),
+    isCheck: chess.isCheck(),
+    isCheckmate: chess.isCheckmate(),
+    isStalemate: chess.isStalemate(),
+    isDraw: chess.isDraw(),
+    isGameOver: chess.isGameOver(),
+    status: describeStatus(chess),
+    nextAction: chess.isGameOver()
+      ? 'game-over'
+      : chess.turn() === agentColor
+        ? 'agent-move'
+        : 'wait-for-human-move'
+  }
+}
+
+function textContent(value: unknown) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(value, null, 2) }]
+  }
 }
 
 // Registers the WebMCP tools an agent uses to read the board, move, coach, and reset the game.
@@ -46,13 +83,17 @@ export function useChessWebMcpTools({
   applyMove,
   startNewGame,
   onAgentMove,
-  onSuggestion
+  onSuggestion,
+  subscribeToGameEvent,
+  onWaitStatusChange
 }: ChessWebMcpToolsOptions): SupportStatus {
   const [status, setStatus] = useState<SupportStatus>('checking')
 
   useEffect(() => {
     const controller = new AbortController()
     let cancelled = false
+    let waitInProgress = false
+    let cancelActiveWait: (() => void) | null = null
 
     async function register() {
       if (typeof document === 'undefined' || !document.modelContext) {
@@ -70,24 +111,7 @@ export function useChessWebMcpTools({
             annotations: { readOnlyHint: true },
             execute() {
               const chess = chessGameRef.current
-              const state = {
-                fen: chess.fen(),
-                turn: chess.turn(),
-                humanColor: humanColorRef.current,
-                agentColor: opponentColor(humanColorRef.current),
-                legalMoves: chess.moves(),
-                history: chess.history(),
-                isCheck: chess.isCheck(),
-                isCheckmate: chess.isCheckmate(),
-                isStalemate: chess.isStalemate(),
-                isDraw: chess.isDraw(),
-                isGameOver: chess.isGameOver()
-              }
-              return {
-                content: [
-                  { type: 'text', text: JSON.stringify(state, null, 2) }
-                ]
-              }
+              return textContent(agentState(chess, humanColorRef.current))
             }
           },
           { signal: controller.signal }
@@ -145,14 +169,120 @@ export function useChessWebMcpTools({
                 return { content: [{ type: 'text', text: result.reason }] }
               }
               onAgentMove()
-              return {
-                content: [
-                  {
-                    type: 'text',
-                    text: `Played ${result.san}. ${describeStatus(chess)}`
-                  }
-                ]
+              return textContent({
+                outcome: 'move-played',
+                move: result.san,
+                state: agentState(chess, humanColorRef.current)
+              })
+            }
+          },
+          { signal: controller.signal }
+        )
+
+        await document.modelContext.registerTool(
+          {
+            name: 'chess-wait-for-human-move',
+            description:
+              "Waits for the human to make a move, then returns the updated board state so the same agent run can continue. Call this after making the agent's move, passing the latest FEN as afterFen. If the position already changed, it returns immediately.",
+            inputSchema: {
+              type: 'object',
+              properties: {
+                afterFen: {
+                  type: 'string',
+                  description:
+                    'The FEN most recently observed by the agent. Used to avoid missing a human move made just before this call.'
+                }
+              },
+              required: ['afterFen']
+            },
+            annotations: { readOnlyHint: true },
+            execute({ afterFen }, options) {
+              const signal = options?.signal ?? controller.signal
+              const currentChess = chessGameRef.current
+              const lastSeenFen = String(afterFen)
+              if (currentChess.fen() !== lastSeenFen) {
+                onWaitStatusChange('idle')
+                return textContent({
+                  outcome: 'position-changed',
+                  state: agentState(currentChess, humanColorRef.current)
+                })
               }
+              if (currentChess.isGameOver()) {
+                onWaitStatusChange('idle')
+                return textContent({
+                  outcome: 'game-over',
+                  state: agentState(currentChess, humanColorRef.current)
+                })
+              }
+              if (currentChess.turn() !== humanColorRef.current) {
+                onWaitStatusChange('idle')
+                return textContent({
+                  outcome: 'not-human-turn',
+                  state: agentState(currentChess, humanColorRef.current)
+                })
+              }
+              if (waitInProgress) {
+                return textContent({
+                  outcome: 'already-waiting',
+                  message: 'A human-move wait is already active.',
+                  state: agentState(currentChess, humanColorRef.current)
+                })
+              }
+
+              waitInProgress = true
+              onWaitStatusChange('waiting')
+              return new Promise((resolve, reject) => {
+                let settled = false
+                let unsubscribe = () => {}
+
+                const finish = (result: unknown) => {
+                  if (settled) return
+                  settled = true
+                  window.clearTimeout(timeoutId)
+                  signal.removeEventListener('abort', handleAbort)
+                  unsubscribe()
+                  waitInProgress = false
+                  cancelActiveWait = null
+                  resolve(textContent(result))
+                }
+                const handleAbort = () => {
+                  if (settled) return
+                  settled = true
+                  window.clearTimeout(timeoutId)
+                  unsubscribe()
+                  waitInProgress = false
+                  cancelActiveWait = null
+                  onWaitStatusChange('idle')
+                  reject(signal.reason)
+                }
+                const timeoutId = window.setTimeout(() => {
+                  onWaitStatusChange('timed-out')
+                  finish({
+                    outcome: 'timeout',
+                    message:
+                      'No human move was made before the wait timed out.',
+                    state: agentState(
+                      chessGameRef.current,
+                      humanColorRef.current
+                    )
+                  })
+                }, HUMAN_MOVE_WAIT_TIMEOUT_MS)
+
+                unsubscribe = subscribeToGameEvent((event) => {
+                  onWaitStatusChange('idle')
+                  finish({
+                    outcome:
+                      event === 'human-move' ? 'human-moved' : 'game-reset',
+                    state: agentState(
+                      chessGameRef.current,
+                      humanColorRef.current
+                    )
+                  })
+                })
+                signal.addEventListener('abort', handleAbort, { once: true })
+                cancelActiveWait = handleAbort
+                if (signal.aborted) handleAbort()
+              })
             }
           },
           { signal: controller.signal }
@@ -294,9 +424,10 @@ export function useChessWebMcpTools({
 
     register()
 
-    // Aborting the signal unregisters all four tools.
+    // Settle an active execution, then unregister every tool from this hook.
     return () => {
       cancelled = true
+      cancelActiveWait?.()
       controller.abort()
     }
   }, [
@@ -305,7 +436,9 @@ export function useChessWebMcpTools({
     applyMove,
     startNewGame,
     onAgentMove,
-    onSuggestion
+    onSuggestion,
+    subscribeToGameEvent,
+    onWaitStatusChange
   ])
 
   return status

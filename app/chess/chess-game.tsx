@@ -2,6 +2,7 @@
 
 import {
   useCallback,
+  useEffect,
   useId,
   useMemo,
   useRef,
@@ -51,20 +52,14 @@ const CHECK_SQUARE_STYLE: CSSProperties = {
   animation: 'check-square-pulse 1.1s ease-in-out infinite'
 }
 
+const DEFAULT_STORED_STATE: StoredState = { pgn: '', humanColor: 'w' }
+
 export default function ChessGame() {
-  // Lazy initializers so localStorage is read and parsed only once, on mount.
-  const [initialStored] = useState(
-    () => loadStoredState() ?? { pgn: '', humanColor: 'w' as PlayerColor }
-  )
-  const [game] = useState(() => createGame(initialStored))
+  const [game] = useState(() => createGame(DEFAULT_STORED_STATE))
   const chessGameRef = useRef<Chess>(game)
-  const [humanColor, setHumanColor] = useState<PlayerColor>(
-    initialStored.humanColor
-  )
+  const [humanColor, setHumanColor] = useState<PlayerColor>('w')
   const humanColorRef = useRef(humanColor)
-  const [colorChoice, setColorChoice] = useState<PlayerColor>(
-    initialStored.humanColor
-  )
+  const [colorChoice, setColorChoice] = useState<PlayerColor>('w')
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(() =>
     snapshotOf(game)
   )
@@ -80,7 +75,32 @@ export default function ChessGame() {
   >({})
   // When on, the human can move either color's pieces (no AI opponent needed); chess.js still enforces whose turn it is.
   const [freeForAll, setFreeForAll] = useState(false)
+  const [agentWaitStatus, setAgentWaitStatus] = useState<
+    'idle' | 'waiting' | 'timed-out'
+  >('idle')
+  const gameEventListenersRef = useRef(
+    new Set<(event: 'human-move' | 'reset') => void>()
+  )
   const colorSelectId = useId()
+
+  useEffect(() => {
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      const stored = loadStoredState()
+      if (!stored) return
+
+      const storedGame = createGame(stored)
+      chessGameRef.current = storedGame
+      humanColorRef.current = stored.humanColor
+      setHumanColor(stored.humanColor)
+      setColorChoice(stored.humanColor)
+      setSnapshot(snapshotOf(storedGame))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const persist = useCallback(() => {
     if (typeof window === 'undefined') return
@@ -115,6 +135,20 @@ export default function ChessGame() {
     refresh()
     persist()
   }, [clearCoach, refresh, persist])
+
+  const completeHumanMove = useCallback(() => {
+    completeMove()
+    gameEventListenersRef.current.forEach((listener) => listener('human-move'))
+  }, [completeMove])
+
+  const subscribeToGameEvent = useCallback(
+    (listener: (event: 'human-move' | 'reset') => void) => {
+      const listeners = gameEventListenersRef.current
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    []
+  )
 
   const applySuggestion = useCallback(
     (suggestions: CoachSuggestion[], note: string | null) => {
@@ -153,6 +187,7 @@ export default function ChessGame() {
       clearCoach()
       refresh()
       persist()
+      gameEventListenersRef.current.forEach((listener) => listener('reset'))
     },
     [clearSelection, clearCoach, refresh, persist]
   )
@@ -219,7 +254,7 @@ export default function ChessGame() {
 
     const result = applyMove(selectedSquare, square)
     clearSelection()
-    if (result.ok) completeMove()
+    if (result.ok) completeHumanMove()
   }
 
   function handlePieceDrop({
@@ -246,7 +281,7 @@ export default function ChessGame() {
 
     const result = applyMove(sourceSquare, targetSquare)
     if (!result.ok) return false
-    completeMove()
+    completeHumanMove()
     return true
   }
 
@@ -254,7 +289,7 @@ export default function ChessGame() {
     if (!pendingPromotion) return
     const result = applyMove(pendingPromotion.from, pendingPromotion.to, piece)
     setPendingPromotion(null)
-    if (result.ok) completeMove()
+    if (result.ok) completeHumanMove()
   }
 
   function canDragPiece({ isSparePiece, piece }: PieceHandlerArgs): boolean {
@@ -271,7 +306,9 @@ export default function ChessGame() {
     applyMove,
     startNewGame,
     onAgentMove: completeMove,
-    onSuggestion: applySuggestion
+    onSuggestion: applySuggestion,
+    subscribeToGameEvent,
+    onWaitStatusChange: setAgentWaitStatus
   })
 
   const coachArrows = coachSuggestions.map((suggestion) => ({
@@ -379,9 +416,18 @@ export default function ChessGame() {
         </button>
       </div>
 
-      <p className="text-lg font-semibold text-black dark:text-zinc-50">
-        {snapshot.statusText}
-      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <p className="text-lg font-semibold text-black dark:text-zinc-50">
+          {snapshot.statusText}
+        </p>
+        {agentWaitStatus !== 'idle' && (
+          <span className="rounded-full border border-black/10 px-3 py-1 text-xs font-medium text-zinc-600 dark:border-white/15 dark:text-zinc-300">
+            {agentWaitStatus === 'waiting'
+              ? 'Agent waiting for your move'
+              : 'Agent wait timed out'}
+          </span>
+        )}
+      </div>
 
       <div className="relative mx-auto w-full max-w-225">
         <Chessboard options={boardOptions} />
