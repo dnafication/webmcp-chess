@@ -622,7 +622,13 @@ export default function ChessGame() {
             <h2 className="font-semibold text-zinc-950 dark:text-zinc-50">
               WebMCP
             </h2>
-            <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-600 dark:bg-emerald-400" />
+            <span
+              className={`h-2 w-2 shrink-0 rounded-full ${
+                status === 'ready'
+                  ? 'bg-emerald-600 dark:bg-emerald-400'
+                  : 'bg-orange-500 dark:bg-orange-400'
+              }`}
+            />
           </div>
           <p className="leading-6 text-zinc-600 dark:text-zinc-400">
             <StatusLabel status={status} />
@@ -649,21 +655,51 @@ export default function ChessGame() {
               </div>
             </div>
           )}
-          <div className="border-t border-black/10 pt-3 dark:border-white/10">
-            <h3 className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
-              Registered tools
-            </h3>
-            <ul className="mt-2 flex flex-wrap gap-1.5">
-              {TOOL_NAMES.map((name) => (
-                <li
-                  key={name}
-                  className="rounded-full border border-black/10 bg-zinc-50 px-2.5 py-1 font-mono text-xs text-zinc-600 dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-400"
-                >
-                  {name}
+          {status === 'unsupported' ? (
+            <div className="flex flex-col gap-2 border-t border-black/10 pt-3 dark:border-white/10">
+              <h3 className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
+                Get set up
+              </h3>
+              <ul className="flex flex-col gap-1.5">
+                <li>
+                  <a
+                    href="https://developer.chrome.com/docs/ai/webmcp"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-medium text-orange-700 underline underline-offset-4 hover:text-orange-800 dark:text-orange-400 dark:hover:text-orange-300"
+                  >
+                    Enable WebMCP in Chrome
+                  </a>
                 </li>
-              ))}
-            </ul>
-          </div>
+                <li>
+                  <a
+                    href="https://help.openai.com/en/articles/20001277-using-the-built-in-browser-in-the-chatgpt-desktop-app"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-medium text-orange-700 underline underline-offset-4 hover:text-orange-800 dark:text-orange-400 dark:hover:text-orange-300"
+                  >
+                    Use the ChatGPT desktop app&apos;s built-in browser
+                  </a>
+                </li>
+              </ul>
+            </div>
+          ) : (
+            <div className="border-t border-black/10 pt-3 dark:border-white/10">
+              <h3 className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
+                Registered tools
+              </h3>
+              <ul className="mt-2 flex flex-wrap gap-1.5">
+                {TOOL_NAMES.map((name) => (
+                  <li
+                    key={name}
+                    className="rounded-full border border-black/10 bg-zinc-50 px-2.5 py-1 font-mono text-xs text-zinc-600 dark:border-white/10 dark:bg-zinc-950 dark:text-zinc-400"
+                  >
+                    {name}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </section>
 
         {(coachNote || coachSuggestions.length > 0) && (
@@ -743,7 +779,8 @@ function StatusLabel({
       return (
         <>
           This browser doesn&apos;t support WebMCP yet. Drag-and-drop and
-          click-to-move still work — see the README for supported browsers.
+          click-to-move still work. To play with an agent, use one of the
+          options below.
         </>
       )
     case 'error':

@@ -1,5 +1,5 @@
 {
-  "name": "webmcp-hello",
+  "name": "webmcp-chess",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -24,6 +24,7 @@
     "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",
     "typescript": "^5",
+    "vercel": "^59.11.2",
     "webmcp-types": "^0.1.5"
   },
   "packageManager": "pnpm@10.11.1"
