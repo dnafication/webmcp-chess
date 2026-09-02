@@ -13,9 +13,12 @@ const geistMono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: 'WebMCP Hello World',
+  title: {
+    default: 'WebMCP Chess',
+    template: '%s'
+  },
   description:
-    'A minimal Next.js app demonstrating the WebMCP document.modelContext API.'
+    'Play chess with a person or an AI agent through registered WebMCP tools.'
 }
 
 export default function RootLayout({ children }: LayoutProps<'/'>) {

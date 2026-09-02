@@ -19,8 +19,9 @@ export const boardThemeOptions: Pick<
   | 'dropSquareStyle'
 > = {
   boardStyle: {
-    borderRadius: '12px',
-    boxShadow: '0 20px 40px -24px rgba(0, 0, 0, 0.45)'
+    borderRadius: '8px',
+    boxShadow:
+      '0 1px 2px rgba(0, 0, 0, 0.12), 0 20px 45px -28px rgba(0, 0, 0, 0.55)'
   },
   lightSquareStyle: { backgroundColor: LIGHT_SQUARE },
   darkSquareStyle: { backgroundColor: DARK_SQUARE },
@@ -41,6 +42,6 @@ export const boardThemeOptions: Pick<
     userSelect: 'none'
   },
   dropSquareStyle: {
-    boxShadow: 'inset 0 0 0 3px rgba(37, 99, 235, 0.65)'
+    boxShadow: 'inset 0 0 0 3px rgba(4, 120, 87, 0.75)'
   }
 }

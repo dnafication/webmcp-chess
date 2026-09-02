@@ -2,10 +2,12 @@ This is a [Next.js](https://nextjs.org) project demonstrating [WebMCP](https://g
 
 ## What this demo shows
 
-There's a single domain action — greeting a person by name — reachable two ways:
+The main page is a chess game that a person can play directly or share with an AI agent. Its registered WebMCP tools let an agent inspect the position, make a move, suggest a move, start a new game, and wait for the human player.
+
+The smaller greeting example is available at `/hello`. Its single domain action — greeting a person by name — is reachable two ways:
 
 1. **As a human**, through the name field and "Say hello" button on the page.
-2. **As an agent**, through a WebMCP tool named `say-hello`, registered via `document.modelContext.registerTool()` in [app/webmcp-hello.tsx](app/webmcp-hello.tsx).
+2. **As an agent**, through a WebMCP tool named `say-hello`, registered via `document.modelContext.registerTool()` in [app/hello/webmcp-hello.tsx](app/hello/webmcp-hello.tsx).
 
 Both paths call the same `buildGreeting()` function and update the same on-screen state, which is the core idea behind WebMCP: reuse your existing client-side logic instead of building a separate backend integration for agents.
 
@@ -17,6 +19,16 @@ Both paths call the same `buildGreeting()` function and update the same on-scree
 - **Cleanup**: The registration is tied to an `AbortController`. Aborting it on unmount unregisters the tool, matching the `signal` option in `ModelContextRegisterToolOptions`.
 
 Types for `document.modelContext` come from the [`webmcp-types`](https://www.npmjs.com/package/webmcp-types) package (see [app/webmcp.d.ts](app/webmcp.d.ts)).
+
+## Chess turn handoff
+
+The chess game at `/` includes a `chess-wait-for-human-move` tool for continuous human-agent play. After making its move, the agent calls this tool with the FEN returned by `chess-make-move`. The tool keeps that execution pending until the human moves, then resolves with the updated board state so the same agent run can continue.
+
+The FEN also prevents a lost wake-up: if the human moves after the agent reads the board but before the wait starts, the tool sees that the position already differs and returns immediately. Waits are abortable, limited to one active call, and time out after two minutes.
+
+This is a workaround for a current protocol limitation, not unsolicited push. WebMCP has no application-state notification that can start a new turn in an idle browser agent. The specified `toolchange` event only reports changes to the registered tool list, while browser-agent observation timing is implementation-defined. If an agent host cancels long-running calls or blocks page interaction while a tool is pending, continuous play requires another user message or a controlled agent host such as an extension or in-page orchestrator.
+
+The relevant design discussions are [application-driven observations](https://github.com/webmachinelearning/webmcp/issues/229), [human-in-the-loop elicitation](https://github.com/webmachinelearning/webmcp/issues/165), and [long-running tool progress](https://github.com/webmachinelearning/webmcp/issues/196).
 
 ## Browser support (experimental)
 
@@ -38,7 +50,7 @@ pnpm install
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with a browser to see the result. Other useful commands:
+Open [http://localhost:3000](http://localhost:3000) with a browser to play chess, or visit [http://localhost:3000/hello](http://localhost:3000/hello) for the greeting example. Other useful commands:
 
 ```bash
 pnpm lint    # ESLint

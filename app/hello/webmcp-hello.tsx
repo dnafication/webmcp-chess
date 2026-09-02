@@ -6,7 +6,6 @@ type SupportStatus = 'checking' | 'ready' | 'unsupported' | 'error'
 
 const TOOL_NAME = 'say-hello'
 
-// Shared action so the human form and the agent tool exercise identical logic.
 function buildGreeting(name: string): string {
   const trimmed = name.trim()
   return trimmed.length > 0 ? `Hello, ${trimmed}! 👋` : 'Hello there! 👋'
@@ -63,7 +62,6 @@ export default function WebMcpHello() {
 
     register()
 
-    // Aborting the signal unregisters the tool.
     return () => {
       cancelled = true
       controller.abort()
@@ -76,12 +74,12 @@ export default function WebMcpHello() {
   }
 
   return (
-    <div className="flex w-full max-w-xl flex-col gap-8">
+    <div className="flex w-full flex-col gap-8 rounded-lg border border-black/10 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-zinc-900 sm:p-8">
       <div className="flex flex-col gap-2">
-        <p className="text-sm font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        <p className="text-xs font-semibold uppercase text-emerald-700 dark:text-emerald-400">
           Greeting
         </p>
-        <p className="text-2xl font-semibold text-black dark:text-zinc-50">
+        <p className="text-2xl font-semibold text-zinc-950 dark:text-zinc-50">
           {greeting}
         </p>
       </div>
@@ -96,18 +94,18 @@ export default function WebMcpHello() {
           value={name}
           onChange={(event) => setName(event.target.value)}
           placeholder="Enter your name"
-          className="flex-1 rounded-full border border-black/8 bg-white px-5 py-3 text-base text-black outline-none focus-visible:ring-2 focus-visible:ring-black dark:border-white/[.145] dark:bg-black dark:text-zinc-50 dark:focus-visible:ring-white"
+          className="min-w-0 flex-1 rounded-md border border-black/15 bg-white px-4 py-3 text-base text-zinc-950 outline-none transition focus-visible:border-emerald-600 focus-visible:ring-2 focus-visible:ring-emerald-600/20 dark:border-white/15 dark:bg-zinc-950 dark:text-zinc-50"
         />
         <button
           type="submit"
-          className="rounded-full bg-foreground px-6 py-3 text-base font-medium text-background transition-colors hover:bg-[#383838] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black dark:hover:bg-[#ccc] dark:focus-visible:outline-white"
+          className="rounded-md bg-emerald-700 px-6 py-3 text-base font-semibold text-white transition-colors hover:bg-emerald-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 dark:bg-emerald-500 dark:text-zinc-950 dark:hover:bg-emerald-400"
         >
           Say hello
         </button>
       </form>
 
-      <div className="flex flex-col gap-2 rounded-2xl border border-black/8 p-5 text-sm dark:border-white/[.145]">
-        <p className="font-medium text-black dark:text-zinc-50">
+      <div className="flex flex-col gap-2 border-t border-black/10 pt-5 text-sm dark:border-white/10">
+        <p className="font-medium text-zinc-950 dark:text-zinc-50">
           WebMCP tool: <code className="font-mono">{TOOL_NAME}</code>
         </p>
         <p className="text-zinc-600 dark:text-zinc-400">
