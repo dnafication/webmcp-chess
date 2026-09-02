@@ -1,12 +1,21 @@
 'use client'
 
-import { useCallback, useId, useRef, useState, type CSSProperties } from 'react'
+import {
+  useCallback,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties
+} from 'react'
 import { Chess, type Square } from 'chess.js'
 import {
   Chessboard,
+  defaultPieces,
   type ChessboardOptions,
   type PieceDropHandlerArgs,
   type PieceHandlerArgs,
+  type PieceRenderObject,
   type SquareHandlerArgs
 } from 'react-chessboard'
 import { boardThemeOptions } from './chess-board-theme'
@@ -36,6 +45,11 @@ const QUIET_MOVE_SQUARE_STYLE: CSSProperties = {
   background: 'radial-gradient(circle, rgba(0,0,0,.18) 25%, transparent 25%)',
   borderRadius: '50%'
 }
+const CHECK_SQUARE_STYLE: CSSProperties = {
+  background:
+    'radial-gradient(circle, rgba(220,38,38,0.85) 0%, rgba(220,38,38,0.35) 55%, transparent 75%)',
+  animation: 'check-square-pulse 1.1s ease-in-out infinite'
+}
 
 export default function ChessGame() {
   // Lazy initializers so localStorage is read and parsed only once, on mount.
@@ -64,6 +78,8 @@ export default function ChessGame() {
   const [moveOptionSquares, setMoveOptionSquares] = useState<
     Record<string, CSSProperties>
   >({})
+  // When on, the human can move either color's pieces (no AI opponent needed); chess.js still enforces whose turn it is.
+  const [freeForAll, setFreeForAll] = useState(false)
   const colorSelectId = useId()
 
   const persist = useCallback(() => {
@@ -145,7 +161,7 @@ export default function ChessGame() {
   // Returns false and clears highlights if the square has no piece the human can currently move.
   function getMoveOptions(square: string): boolean {
     const chess = chessGameRef.current
-    if (chess.isGameOver() || chess.turn() !== humanColor) {
+    if (chess.isGameOver() || (!freeForAll && chess.turn() !== humanColor)) {
       setMoveOptionSquares({})
       return false
     }
@@ -213,7 +229,8 @@ export default function ChessGame() {
     clearSelection()
     if (!targetSquare) return false
     const chess = chessGameRef.current
-    if (chess.isGameOver() || chess.turn() !== humanColor) return false
+    if (chess.isGameOver() || (!freeForAll && chess.turn() !== humanColor))
+      return false
 
     const candidates = chess.moves({
       square: sourceSquare as Square,
@@ -243,8 +260,9 @@ export default function ChessGame() {
   function canDragPiece({ isSparePiece, piece }: PieceHandlerArgs): boolean {
     if (isSparePiece) return false
     const chess = chessGameRef.current
-    if (chess.isGameOver() || chess.turn() !== humanColor) return false
-    return piece.pieceType.charAt(0) === humanColor
+    if (chess.isGameOver()) return false
+    if (!freeForAll && chess.turn() !== humanColor) return false
+    return piece.pieceType.charAt(0) === chess.turn()
   }
 
   const status = useChessWebMcpTools({
@@ -262,12 +280,49 @@ export default function ChessGame() {
     color: suggestion.color
   }))
 
+  // Wraps the king SVGs so the one currently in check plays a shake animation.
+  const checkAwarePieces = useMemo<PieceRenderObject>(() => {
+    const checkSquare = snapshot.checkSquare
+    function shakeableKing(pieceType: 'wK' | 'bK') {
+      const BaseKing = defaultPieces[pieceType]
+      return function ShakeableKing(props?: {
+        fill?: string
+        square?: string
+        svgStyle?: CSSProperties
+      }) {
+        return (
+          <div
+            style={{
+              width: '100%',
+              height: '100%',
+              ...(props?.square === checkSquare
+                ? { animation: 'king-shake 0.5s ease-in-out' }
+                : {})
+            }}
+          >
+            <BaseKing {...props} />
+          </div>
+        )
+      }
+    }
+    return {
+      ...defaultPieces,
+      wK: shakeableKing('wK'),
+      bK: shakeableKing('bK')
+    }
+  }, [snapshot.checkSquare])
+
+  const checkSquareStyles: Record<string, CSSProperties> = snapshot.checkSquare
+    ? { [snapshot.checkSquare]: CHECK_SQUARE_STYLE }
+    : {}
+
   const boardOptions: ChessboardOptions = {
     id: 'webmcp-chess',
     position: snapshot.fen,
     boardOrientation: humanColor === 'w' ? 'white' : 'black',
     arrows: coachArrows,
-    squareStyles: moveOptionSquares,
+    squareStyles: { ...checkSquareStyles, ...moveOptionSquares },
+    pieces: checkAwarePieces,
     canDragPiece,
     onPieceDrop: handlePieceDrop,
     onSquareClick: handleSquareClick,
@@ -306,6 +361,15 @@ export default function ChessGame() {
             <option value="b">Black</option>
           </select>
         </div>
+        <label className="flex items-center gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400">
+          <input
+            type="checkbox"
+            checked={freeForAll}
+            onChange={(event) => setFreeForAll(event.target.checked)}
+            className="h-4 w-4 rounded border-black/20 dark:border-white/30"
+          />
+          Move both sides
+        </label>
         <button
           type="button"
           onClick={() => startNewGame(colorChoice)}

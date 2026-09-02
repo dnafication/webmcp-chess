@@ -12,6 +12,7 @@ export type BoardSnapshot = {
   fen: string
   history: string[]
   statusText: string
+  checkSquare: string | null
 }
 // A coached move suggestion drawn as a colored arrow, with an optional reason shown in the panel below the board.
 export type CoachSuggestion = {
@@ -51,12 +52,25 @@ export function describeStatus(chess: Chess): string {
   return `${colorName(chess.turn())} to move.`
 }
 
+// The square of the king currently in check, or null. Drives the check highlight and king shake.
+export function findCheckedKingSquare(chess: Chess): string | null {
+  if (!chess.isCheck()) return null
+  const color = chess.turn()
+  for (const row of chess.board()) {
+    for (const cell of row) {
+      if (cell && cell.type === 'k' && cell.color === color) return cell.square
+    }
+  }
+  return null
+}
+
 // Captured once per mutation (never read from render) so render stays pure.
 export function snapshotOf(chess: Chess): BoardSnapshot {
   return {
     fen: chess.fen(),
     history: chess.history(),
-    statusText: describeStatus(chess)
+    statusText: describeStatus(chess),
+    checkSquare: findCheckedKingSquare(chess)
   }
 }
 

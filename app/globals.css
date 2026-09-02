@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 :root {
   --background: #ffffff;
@@ -23,4 +23,33 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+@keyframes check-square-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+@keyframes king-shake {
+  0%,
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
+  20% {
+    transform: translateX(-6%) rotate(-8deg);
+  }
+  40% {
+    transform: translateX(5%) rotate(6deg);
+  }
+  60% {
+    transform: translateX(-4%) rotate(-5deg);
+  }
+  80% {
+    transform: translateX(3%) rotate(3deg);
+  }
 }
