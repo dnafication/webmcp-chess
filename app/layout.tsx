@@ -32,7 +32,7 @@ export default function RootLayout({ children }: LayoutProps<'/'>) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <div className="fixed right-4 top-4 z-50 flex items-center gap-2">
+        <div className="flex items-center justify-end gap-2 px-4 py-3 sm:px-8">
           <a
             href={YOUTUBE_DEMO_URL}
             target="_blank"
