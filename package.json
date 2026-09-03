@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "deploy": "vercel",
-    "deploy:prod": "vercel --prod"
+    "deploy:prod": "vercel deploy --prod"
   },
   "dependencies": {
     "chess.js": "^1.4.0",
