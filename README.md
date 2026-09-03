@@ -1,102 +1,69 @@
-This is a [Next.js](https://nextjs.org) project demonstrating [WebMCP](https://github.com/webmachinelearning/webmcp), a proposed web platform API that lets a page expose its own client-side functionality as "tools" that an AI agent can discover and invoke.
+# WebMCP Chess
 
-## What this demo shows
+A chess game you can play against a human, or hand over to an AI agent mid-game, on the same board, same rules, same move history. No backend MCP server. The page itself exposes its own client-side functions as tools, using [WebMCP](https://github.com/webmachinelearning/webmcp) (`document.modelContext`), a proposed web platform API.
 
-The main page is a chess game that a person can play directly or share with an AI agent. Its registered WebMCP tools let an agent inspect the position, make a move, suggest a move, start a new game, and wait for the human player.
+**[Try it live](https://webmcp-chess.vercel.app/)** · [Watch the demo](https://youtu.be/V1XKsC1XuMo) · Built for the WebMCP hackathon
 
-The smaller greeting example is available at `/hello`. Its single domain action — greeting a person by name — is reachable two ways:
+## Why this exists
 
-1. **As a human**, through the name field and "Say hello" button on the page.
-2. **As an agent**, through a WebMCP tool named `say-hello`, registered via `document.modelContext.registerTool()` in [app/hello/webmcp-hello.tsx](app/hello/webmcp-hello.tsx).
+An agent that wants to play chess with you currently has to scrape the DOM or simulate clicks. WebMCP flips that: the page registers its own tools, so the agent calls `chess-make-move` the same way a click handler would, through the same validated chess logic a human's move goes through. No fork between "the UI" and "the agent-facing API."
 
-Both paths call the same `buildGreeting()` function and update the same on-screen state, which is the core idea behind WebMCP: reuse your existing client-side logic instead of building a separate backend integration for agents.
+## What it does
 
-### The tool lifecycle
+Open the board and either play it yourself, or point a WebMCP-capable agent (ChatGPT's browser is the one tested here) at it and ask it to play. It will:
 
-- **Registration**: On mount, the component calls `document.modelContext.registerTool()` with a name, description, and a JSON Schema requiring a `name` string.
-- **Discovery**: A browser-integrated agent (or another script calling `document.modelContext.getTools()`) can see the tool and its schema.
-- **Invocation**: The agent calls the tool with `{ "name": "Dina" }`; the `execute` callback updates the page's state and returns a structured result.
-- **Cleanup**: The registration is tied to an `AbortController`. Aborting it on unmount unregisters the tool, matching the `signal` option in `ModelContextRegisterToolOptions`.
+- Read the current position (`chess-get-board-state`)
+- Make a legal move (`chess-make-move`)
+- Wait for your move, then pick back up automatically (`chess-wait-for-human-move`)
+- Switch to coaching on request: rank candidate moves, draw arrows, and explain the reasoning (`chess-suggest-move`)
+- Reset the game (`chess-new-game`)
 
-Types for `document.modelContext` come from the [`webmcp-types`](https://www.npmjs.com/package/webmcp-types) package (see [app/webmcp.d.ts](app/webmcp.d.ts)).
+A smaller example lives at `/hello`: one function, `buildGreeting()`, reachable both by a human typing a name into a form and by an agent calling the `say-hello` tool. It's the shortest possible illustration of the same idea.
 
-## Chess turn handoff
+## The interesting problem: waking an idle agent
 
-The chess game at `/` includes a `chess-wait-for-human-move` tool for continuous human-agent play. After making its move, the agent calls this tool with the FEN returned by `chess-make-move`. The tool keeps that execution pending until the human moves, then resolves with the updated board state so the same agent run can continue.
+WebMCP has no way to notify an idle agent that the board changed, there's no push, no application-state event it can react to. `chess-wait-for-human-move` works around that with a long-running call: the agent calls it and the call simply doesn't return until you move.
 
-The FEN also prevents a lost wake-up: if the human moves after the agent reads the board but before the wait starts, the tool sees that the position already differs and returns immediately. Waits are abortable, limited to one active call, and time out after two minutes.
+Two things keep that safe:
 
-This is a workaround for a current protocol limitation, not unsolicited push. WebMCP has no application-state notification that can start a new turn in an idle browser agent. The specified `toolchange` event only reports changes to the registered tool list, while browser-agent observation timing is implementation-defined. If an agent host cancels long-running calls or blocks page interaction while a tool is pending, continuous play requires another user message or a controlled agent host such as an extension or in-page orchestrator.
+- **A last-seen FEN check** — if you'd already moved before the wait started, it returns immediately instead of hanging on a move that already happened.
+- **A two-minute timeout and abort path** — so a call never hangs forever or blocks a second attempt.
 
-The relevant design discussions are [application-driven observations](https://github.com/webmachinelearning/webmcp/issues/229), [human-in-the-loop elicitation](https://github.com/webmachinelearning/webmcp/issues/165), and [long-running tool progress](https://github.com/webmachinelearning/webmcp/issues/196).
+This is a workaround for a real protocol gap, not a claim that WebMCP does push notifications. See the open design discussions on [application-driven observations](https://github.com/webmachinelearning/webmcp/issues/229), [human-in-the-loop elicitation](https://github.com/webmachinelearning/webmcp/issues/165), and [long-running tool progress](https://github.com/webmachinelearning/webmcp/issues/196).
 
-## Browser support (experimental)
+## What's next
 
-WebMCP is an early-stage Web Machine Learning Community Group proposal, not a finished standard. As of this writing:
+A legal move isn't necessarily a strong one, ChatGPT has proposed legal but tactically losing moves during testing. Given more time: Stockfish would rank candidates and catch tactical mistakes deterministically, and the language model would stay on the part it's actually good at, explaining plans and tradeoffs in human terms.
 
-- **ChatGPT Desktop** supports it.
-- **Brave** has experimental support in Leo AI chat.
-- **Chrome 149** and **Edge 150** support it behind an origin trial (requires enrollment; won't work in a stock browser without it).
-- **Firefox** and **Safari** don't implement it yet.
+## Browser support
 
-See the [implementation status](https://github.com/webmachinelearning/webmcp/blob/main/implementation-status.md) for the current picture. In any other browser, the page detects the missing `document.modelContext` API and falls back to an "unsupported" status — the human form keeps working regardless.
+WebMCP is an early-stage proposal, not a shipped standard. As of this writing: **ChatGPT Desktop** supports it, **Brave/Leo** has experimental support, **Chrome 149/Edge 150** support it behind an origin trial, **Firefox/Safari** don't yet. See the [implementation status](https://github.com/webmachinelearning/webmcp/blob/main/implementation-status.md) for the current picture.
 
-`document.modelContext` is also only available in a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (HTTPS or localhost), which a Vercel deployment satisfies automatically.
+Where it's unsupported, the page detects the missing `document.modelContext` API and falls back cleanly, the human UI always works standalone. It also requires a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts) (HTTPS or localhost).
 
-## Getting Started
+## Running it locally
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with a browser to play chess, or visit [http://localhost:3000/hello](http://localhost:3000/hello) for the greeting example. Other useful commands:
+Open [localhost:3000](http://localhost:3000) to play chess, or [localhost:3000/hello](http://localhost:3000/hello) for the minimal example.
 
 ```bash
 pnpm lint    # ESLint
-pnpm build   # Production build / type-check
-pnpm start   # Serve a production build locally
+pnpm build   # production build / type-check
+pnpm start   # serve a production build locally
 ```
 
-## Deploying with the Vercel CLI
+## Code worth reading
 
-This project hasn't been linked to a Vercel project yet. To deploy it:
+- [`app/chess/use-chess-webmcp-tools.ts`](app/chess/use-chess-webmcp-tools.ts) — all five tool registrations, the wait-for-human-move logic, FEN race protection
+- [`app/hello/webmcp-hello.tsx`](app/hello/webmcp-hello.tsx) — the smallest possible tool registration, good starting point if you're new to WebMCP
+- [`app/webmcp.d.ts`](app/webmcp.d.ts) — types for `document.modelContext`, from [`webmcp-types`](https://www.npmjs.com/package/webmcp-types)
 
-1. Check whether the CLI is installed:
-
-   ```bash
-   vercel --version
-   ```
-
-   If it isn't, you can run it without a global install via `pnpm dlx`:
-
-   ```bash
-   pnpm dlx vercel --version
-   ```
-
-2. Log in (opens a browser to authenticate):
-
-   ```bash
-   vercel login
-   ```
-
-3. From the project root, create a preview deployment. The first run prompts you to link or create a Vercel project:
-
-   ```bash
-   vercel
-   ```
-
-4. Once you're happy with a preview, promote it to production:
-
-   ```bash
-   vercel --prod
-   ```
-
-Because `document.modelContext` requires a secure context, a deployed Vercel preview URL (HTTPS) is a reliable way to test WebMCP support outside of `localhost`.
-
-## Learn More
+## Learn more
 
 - [WebMCP specification and explainer](https://github.com/webmachinelearning/webmcp)
 - [WebMCP implementation status](https://github.com/webmachinelearning/webmcp/blob/main/implementation-status.md)
-- [Next.js Documentation](https://nextjs.org/docs)
-- [Vercel CLI reference](https://vercel.com/docs/cli)
+- [Next.js documentation](https://nextjs.org/docs)
