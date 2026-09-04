@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Vendored third-party engine build, served as a static asset and never
+    // edited here. See public/stockfish/PROVENANCE.md.
+    "public/stockfish/**",
   ]),
 ]);
 

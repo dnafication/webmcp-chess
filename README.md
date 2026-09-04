@@ -15,6 +15,9 @@ Open the board and either play it yourself, or point a WebMCP-capable agent (Cha
 - Read the current position (`chess-get-board-state`)
 - Make a legal move (`chess-make-move`)
 - Wait for your move, then pick back up automatically (`chess-wait-for-human-move`)
+- Ask Stockfish for the strongest moves in the position (`chess-analyze-position`)
+- Tell you whether the move you just played was a mistake, and why (`chess-evaluate-move`)
+- Dial its own playing strength up or down (`chess-set-engine-strength`)
 - Switch to coaching on request: rank candidate moves, draw arrows, and explain the reasoning (`chess-suggest-move`)
 - Reset the game (`chess-new-game`)
 
@@ -31,9 +34,23 @@ Two things keep that safe:
 
 This is a workaround for a real protocol gap, not a claim that WebMCP does push notifications. See the open design discussions on [application-driven observations](https://github.com/webmachinelearning/webmcp/issues/229), [human-in-the-loop elicitation](https://github.com/webmachinelearning/webmcp/issues/165), and [long-running tool progress](https://github.com/webmachinelearning/webmcp/issues/196).
 
-## What's next
+## The engine calculates, the model explains
 
-A legal move isn't necessarily a strong one, ChatGPT has proposed legal but tactically losing moves during testing. Given more time: Stockfish would rank candidates and catch tactical mistakes deterministically, and the language model would stay on the part it's actually good at, explaining plans and tradeoffs in human terms.
+A legal move isn't necessarily a strong one. Early on, ChatGPT would happily propose legal but tactically losing moves, because the only thing the page told it was which moves were legal.
+
+Stockfish 18 now runs in the page, compiled to WebAssembly in a Web Worker, and the split of labour is deliberate. The engine does the calculating: it searches the position and returns ranked lines with real evaluations. The model does the explaining: it turns a principal variation into a sentence you can learn something from. Neither is asked to do the other's job.
+
+Three things follow from that:
+
+- **Coaching is always full strength.** `chess-set-engine-strength` weakens the moves the agent plays against you, so it can be a beatable opponent. It never weakens the advice you're given.
+- **Every score is reported from White's perspective.** UCI reports from the side to move, which is a sign flip away from how every human reads a board. Getting that backwards would produce confident, fluent, inverted advice, so both readings travel together in the tool output and the flip is [covered by tests against real engine output](app/chess/chess-analysis.test.ts).
+- **Nothing moved to a server.** The engine is a static asset the page loads on demand. There's still no backend.
+
+The engine binary is roughly 7 MB, so it downloads on the first analysis rather than on page load. There's a button in the Stockfish panel to warm it up, and it uses the same code path an agent's tool call does.
+
+### Licensing
+
+Stockfish is GPL-3.0. The engine build in [`public/stockfish/`](public/stockfish/) is unmodified upstream, shipped with its licence text and [provenance](public/stockfish/PROVENANCE.md) including checksums. This repository's own code stays MIT: it never links against the engine, it only exchanges UCI protocol strings with a separate program over `postMessage`.
 
 ## Browser support
 
@@ -52,13 +69,16 @@ Open [localhost:3000](http://localhost:3000) to play chess, or [localhost:3000/h
 
 ```bash
 pnpm lint    # ESLint
+pnpm test    # Vitest, covers the engine-output parsing and score perspective
 pnpm build   # production build / type-check
 pnpm start   # serve a production build locally
 ```
 
 ## Code worth reading
 
-- [`app/chess/use-chess-webmcp-tools.ts`](app/chess/use-chess-webmcp-tools.ts) — all five tool registrations, the wait-for-human-move logic, FEN race protection
+- [`app/chess/use-chess-webmcp-tools.ts`](app/chess/use-chess-webmcp-tools.ts) — all eight tool registrations, the wait-for-human-move logic, FEN race protection
+- [`app/chess/stockfish-engine.ts`](app/chess/stockfish-engine.ts) — the UCI client: serialised searches, sticky-option reconciliation, abort handling
+- [`app/chess/chess-analysis.ts`](app/chess/chess-analysis.ts) — the pure half: parsing `info` lines, the White-perspective flip, move classification
 - [`app/hello/webmcp-hello.tsx`](app/hello/webmcp-hello.tsx) — the smallest possible tool registration, good starting point if you're new to WebMCP
 - [`app/webmcp.d.ts`](app/webmcp.d.ts) — types for `document.modelContext`, from [`webmcp-types`](https://www.npmjs.com/package/webmcp-types)
 

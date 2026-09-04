@@ -36,6 +36,18 @@ import {
   type PromotionPiece,
   type StoredState
 } from './chess-helpers'
+import {
+  DEFAULT_ANALYSIS_DEPTH,
+  DEFAULT_MULTI_PV,
+  MAX_SKILL_LEVEL,
+  classificationSymbol,
+  skillLevelToApproxElo,
+  type AnalysisResult,
+  type MoveReview,
+  type Score
+} from './chess-analysis'
+import { ENGINE_DOWNLOAD_MB } from './stockfish-engine'
+import { useStockfishEngine } from './use-stockfish-engine'
 import { TOOL_NAMES, useChessWebMcpTools } from './use-chess-webmcp-tools'
 
 const SELECTED_SQUARE_STYLE: CSSProperties = {
@@ -99,6 +111,7 @@ export default function ChessGame() {
     []
   )
   const [coachNote, setCoachNote] = useState<string | null>(null)
+  const [moveReview, setMoveReview] = useState<MoveReview | null>(null)
   const [pendingPromotion, setPendingPromotion] =
     useState<PendingPromotion | null>(null)
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
@@ -118,6 +131,7 @@ export default function ChessGame() {
     new Set<(event: 'human-move' | 'reset') => void>()
   )
   const colorSelectId = useId()
+  const engineSettingsId = useId()
 
   useEffect(() => {
     let cancelled = false
@@ -201,6 +215,8 @@ export default function ChessGame() {
     scheduleReset(promptCopiedTimeoutRef, () => setPromptCopied(false), 1600)
   }, [])
 
+  const engine = useStockfishEngine()
+
   const clearCoach = useCallback(() => {
     setCoachSuggestions([])
     setCoachNote(null)
@@ -263,6 +279,9 @@ export default function ChessGame() {
       clearSelection()
       setPendingPromotion(null)
       clearCoach()
+      // Reviews are pinned to a history index, so they only go stale when the
+      // history itself is thrown away.
+      setMoveReview(null)
       clearMoveFeedback()
       refresh()
       persist()
@@ -420,8 +439,35 @@ export default function ChessGame() {
     onAgentMove: completeMove,
     onSuggestion: applySuggestion,
     subscribeToGameEvent,
-    onWaitStatusChange: setAgentWaitStatus
+    onWaitStatusChange: setAgentWaitStatus,
+    analyse: engine.analyse,
+    engineSettingsRef: engine.settingsRef,
+    updateEngineSettings: engine.updateSettings,
+    onMoveReview: setMoveReview
   })
+
+  // The same call the chess-analyze-position tool makes, so a human without a
+  // WebMCP-capable browser still gets the engine's view and there is only one
+  // analysis path to keep working.
+  const analyseCurrentPosition = useCallback(() => {
+    const chess = chessGameRef.current
+    if (chess.isGameOver()) return
+    void engine
+      .analyse({
+        fen: chess.fen(),
+        depth: DEFAULT_ANALYSIS_DEPTH,
+        multiPv: DEFAULT_MULTI_PV
+      })
+      // Failures already surface in the panel through `engine.error`.
+      .catch(() => {})
+  }, [engine])
+
+  // Only show an analysis that still describes the position on the board — a
+  // stale eval bar is worse than none, the same reason arrows get cleared on
+  // every move.
+  const currentAnalysis =
+    engine.lastAnalysis?.fen === snapshot.fen ? engine.lastAnalysis : null
+  const currentEvalScore = currentAnalysis?.lines[0]?.score ?? null
 
   // True from the moment a human move (or a fresh game) hands the turn to the
   // agent's color until chess-make-move actually lands — the app has no way to
@@ -496,6 +542,11 @@ export default function ChessGame() {
     },
     ...boardThemeOptions
   }
+
+  // A review is pinned to the half-move it judged, so the badge stays on the
+  // right move as the game continues past it.
+  const reviewFor = (halfMoveIndex: number) =>
+    moveReview?.historyIndex === halfMoveIndex ? moveReview : null
 
   // The +N shown for a side is null unless it's actually ahead — Lichess-style, nothing at level.
   function advantageFor(color: PlayerColor): number | null {
@@ -602,36 +653,42 @@ export default function ChessGame() {
             }
             advantage={advantageFor(topStripColor)}
           />
-          <div className="relative aspect-square overflow-hidden rounded-lg">
-            <Chessboard options={boardOptions} />
-            {pendingPromotion && (
-              <div className="absolute inset-0 flex items-center justify-center bg-white/90 p-4 dark:bg-zinc-950/90">
-                <div className="flex flex-col items-center gap-4 rounded-lg border border-black/10 bg-white p-5 shadow-xl dark:border-white/10 dark:bg-zinc-900">
-                  <p className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
-                    Promote pawn to
-                  </p>
-                  <div className="flex gap-2">
-                    {(['q', 'r', 'b', 'n'] as const).map((piece) => (
-                      <button
-                        key={piece}
-                        type="button"
-                        onClick={() => handlePromotionPick(piece)}
-                        className="h-10 min-w-10 rounded-md border border-black/15 px-3 text-sm font-semibold uppercase text-zinc-950 transition-colors hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-700 dark:border-white/15 dark:text-zinc-50 dark:hover:bg-zinc-800"
-                      >
-                        {piece}
-                      </button>
-                    ))}
+          <div className="flex items-stretch gap-2">
+            <EvalBar
+              score={currentEvalScore}
+              whiteAtBottom={humanColor === 'w'}
+            />
+            <div className="relative aspect-square min-w-0 flex-1 overflow-hidden rounded-lg">
+              <Chessboard options={boardOptions} />
+              {pendingPromotion && (
+                <div className="absolute inset-0 flex items-center justify-center bg-white/90 p-4 dark:bg-zinc-950/90">
+                  <div className="flex flex-col items-center gap-4 rounded-lg border border-black/10 bg-white p-5 shadow-xl dark:border-white/10 dark:bg-zinc-900">
+                    <p className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
+                      Promote pawn to
+                    </p>
+                    <div className="flex gap-2">
+                      {(['q', 'r', 'b', 'n'] as const).map((piece) => (
+                        <button
+                          key={piece}
+                          type="button"
+                          onClick={() => handlePromotionPick(piece)}
+                          className="h-10 min-w-10 rounded-md border border-black/15 px-3 text-sm font-semibold uppercase text-zinc-950 transition-colors hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-700 dark:border-white/15 dark:text-zinc-50 dark:hover:bg-zinc-800"
+                        >
+                          {piece}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPendingPromotion(null)}
+                      className="text-xs font-medium text-zinc-500 underline underline-offset-4 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-50"
+                    >
+                      Cancel
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setPendingPromotion(null)}
-                    className="text-xs font-medium text-zinc-500 underline underline-offset-4 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-50"
-                  >
-                    Cancel
-                  </button>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
           <CapturedPieces
             color={humanColor}
@@ -731,6 +788,14 @@ export default function ChessGame() {
           )}
         </section>
 
+        <EnginePanel
+          engine={engine}
+          analysis={currentAnalysis}
+          engineSettingsId={engineSettingsId}
+          onAnalyse={analyseCurrentPosition}
+          gameOver={snapshot.isGameOver}
+        />
+
         {(coachNote || coachSuggestions.length > 0) && (
           <section className="flex flex-col gap-3 rounded-lg border border-black/10 bg-white p-5 text-sm shadow-sm dark:border-white/10 dark:bg-zinc-900">
             <h2 className="font-semibold text-zinc-950 dark:text-zinc-50">
@@ -753,6 +818,11 @@ export default function ChessGame() {
                       <span className="font-semibold text-zinc-950 dark:text-zinc-50">
                         {suggestion.from}–{suggestion.to}
                       </span>
+                      {suggestion.evalText && (
+                        <span className="ml-2 rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                          {suggestion.evalText}
+                        </span>
+                      )}
                       {suggestion.reason && (
                         <p className="mt-0.5 leading-5 text-zinc-600 dark:text-zinc-400">
                           {suggestion.reason}
@@ -777,8 +847,14 @@ export default function ChessGame() {
               {historyPairs.map((pair, index) => (
                 <li key={index} className="col-span-3 grid grid-cols-subgrid">
                   <span>{index + 1}.</span>
-                  <span>{pair.white}</span>
-                  <span>{pair.black ?? ''}</span>
+                  <HistoryMove
+                    san={pair.white}
+                    review={reviewFor(index * 2)}
+                  />
+                  <HistoryMove
+                    san={pair.black}
+                    review={reviewFor(index * 2 + 1)}
+                  />
                 </li>
               ))}
             </ol>
@@ -786,6 +862,200 @@ export default function ChessGame() {
         </section>
       </aside>
     </div>
+  )
+}
+
+// Maps a centipawn score onto the 0-100 fill of the eval bar. Raw centipawns
+// are unbounded and mostly uninteresting past a few pawns, so this is the usual
+// logistic squash: the bar moves a lot around equality and saturates once the
+// game is decided.
+function evalBarPercent(score: Score | null): number {
+  if (!score) return 50
+  if (score.mateInWhite !== null) {
+    if (score.mateInWhite === 0) return 50
+    return score.mateInWhite > 0 ? 100 : 0
+  }
+  const cp = score.cpWhite ?? 0
+  const winning = 2 / (1 + Math.exp(-0.00368208 * cp)) - 1
+  return Math.max(2, Math.min(98, 50 + 50 * winning))
+}
+
+// A vertical bar beside the board: White's share grows from the bottom when the
+// board is White-side-up, and from the top when it's flipped, so it always
+// matches the player whose pieces are nearest the viewer.
+function EvalBar({
+  score,
+  whiteAtBottom
+}: {
+  score: Score | null
+  whiteAtBottom: boolean
+}) {
+  const whitePercent = evalBarPercent(score)
+  const label = score ? score.display : 'No engine analysis yet'
+
+  return (
+    <div
+      className="relative w-2.5 shrink-0 overflow-hidden rounded-full bg-zinc-800 dark:bg-zinc-950"
+      role="img"
+      aria-label={`Engine evaluation: ${label}`}
+      title={label}
+    >
+      <div
+        className={`absolute inset-x-0 bg-zinc-100 transition-[height] duration-500 ease-out dark:bg-zinc-300 ${
+          whiteAtBottom ? 'bottom-0' : 'top-0'
+        }`}
+        style={{ height: `${whitePercent}%` }}
+      />
+      {!score && (
+        <div className="absolute inset-0 bg-zinc-200 dark:bg-zinc-800" />
+      )}
+    </div>
+  )
+}
+
+const REVIEW_BADGE_STYLES: Record<string, string> = {
+  '?!': 'text-amber-600 dark:text-amber-400',
+  '?': 'text-orange-600 dark:text-orange-400',
+  '??': 'text-red-600 dark:text-red-400'
+}
+
+function HistoryMove({
+  san,
+  review
+}: {
+  san?: string
+  review: MoveReview | null
+}) {
+  if (!san) return <span />
+  const symbol = review ? classificationSymbol(review.classification) : null
+  return (
+    <span>
+      {san}
+      {symbol && (
+        <span
+          className={`ml-1 font-semibold ${REVIEW_BADGE_STYLES[symbol] ?? ''}`}
+          title={`${review?.classification}, ${review?.centipawnLoss} centipawns lost`}
+        >
+          {symbol}
+        </span>
+      )}
+    </span>
+  )
+}
+
+// The engine's own card: load state, how hard it plays, and what it last found.
+function EnginePanel({
+  engine,
+  analysis,
+  engineSettingsId,
+  onAnalyse,
+  gameOver
+}: {
+  engine: ReturnType<typeof useStockfishEngine>
+  analysis: AnalysisResult | null
+  engineSettingsId: string
+  onAnalyse: () => void
+  gameOver: boolean
+}) {
+  const { status, progress, error, settings, updateSettings } = engine
+
+  return (
+    <section className="flex flex-col gap-3 rounded-lg border border-black/10 bg-white p-5 text-sm shadow-sm dark:border-white/10 dark:bg-zinc-900">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="font-semibold text-zinc-950 dark:text-zinc-50">
+          Stockfish
+        </h2>
+        <span
+          className={`h-2 w-2 shrink-0 rounded-full ${
+            status === 'ready'
+              ? 'bg-emerald-600 dark:bg-emerald-400'
+              : status === 'error'
+                ? 'bg-red-600 dark:bg-red-400'
+                : 'bg-orange-500 dark:bg-orange-400'
+          }`}
+        />
+      </div>
+
+      <p className="leading-6 text-zinc-600 dark:text-zinc-400" aria-live="polite">
+        {status === 'idle' &&
+          `Not loaded. It downloads on the first analysis, whether you or an agent asks for one (${ENGINE_DOWNLOAD_MB} MB).`}
+        {status === 'loading' &&
+          `Loading engine… ${progress === null ? '' : `${Math.round(progress)}%`}`}
+        {status === 'ready' &&
+          'Ready. Analyse the position yourself, or let an agent analyse and review your moves.'}
+        {status === 'error' && (error ?? 'The engine could not be loaded.')}
+      </p>
+
+      {status !== 'loading' && (
+        <button
+          type="button"
+          onClick={onAnalyse}
+          disabled={engine.isAnalysing || gameOver}
+          className="h-9 self-start rounded-md border border-black/15 bg-white px-3 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/15 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
+        >
+          {engine.isAnalysing
+            ? 'Analysing…'
+            : status === 'ready'
+              ? 'Analyse position'
+              : `Analyse position (${ENGINE_DOWNLOAD_MB} MB download)`}
+        </button>
+      )}
+
+      {status === 'loading' && progress !== null && (
+        <div className="h-1.5 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+          <div
+            className="h-full bg-emerald-600 transition-[width] duration-300 dark:bg-emerald-400"
+            style={{ width: `${Math.round(progress)}%` }}
+          />
+        </div>
+      )}
+
+      <div className="flex flex-col gap-1.5 border-t border-black/10 pt-3 dark:border-white/10">
+        <label
+          htmlFor={engineSettingsId}
+          className="flex items-center justify-between text-xs font-semibold uppercase text-zinc-500 dark:text-zinc-400"
+        >
+          Opponent strength
+          <span className="font-mono normal-case">{settings.skillLevel}</span>
+        </label>
+        <input
+          id={engineSettingsId}
+          type="range"
+          min={0}
+          max={MAX_SKILL_LEVEL}
+          step={1}
+          value={settings.skillLevel}
+          onChange={(event) =>
+            updateSettings({ skillLevel: Number(event.target.value) })
+          }
+          className="accent-emerald-700 dark:accent-emerald-500"
+        />
+        <p className="text-xs leading-5 text-zinc-500 dark:text-zinc-400">
+          {skillLevelToApproxElo(settings.skillLevel)}. Only limits the moves the
+          agent plays against you — coaching advice is always full strength.
+        </p>
+      </div>
+
+      {analysis && analysis.lines.length > 0 && (
+        <div className="flex flex-col gap-2 border-t border-black/10 pt-3 dark:border-white/10">
+          <h3 className="text-xs font-semibold text-zinc-600 dark:text-zinc-300">
+            Best lines (depth {analysis.depthReached})
+          </h3>
+          <ol className="flex flex-col gap-1.5">
+            {analysis.lines.map((line) => (
+              <li key={line.rank} className="flex items-baseline gap-2">
+                <span className="w-12 shrink-0 font-mono text-xs font-semibold text-zinc-950 dark:text-zinc-50">
+                  {line.score.display}
+                </span>
+                <span className="min-w-0 truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                  {line.pvSan.join(' ')}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </section>
   )
 }
 

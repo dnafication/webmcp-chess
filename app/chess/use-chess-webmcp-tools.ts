@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import type { RefObject } from 'react'
-import type { Chess } from 'chess.js'
+import { Chess } from 'chess.js'
 import {
   ARROW_PALETTE,
   MAX_SUGGESTED_MOVES,
@@ -18,11 +18,39 @@ import {
   type PromotionPiece,
   type SupportStatus
 } from './chess-helpers'
+import {
+  CLASSIFICATION_NOTE,
+  DEFAULT_ANALYSIS_DEPTH,
+  DEFAULT_MULTI_PV,
+  DEFAULT_REVIEW_DEPTH,
+  MAX_ANALYSIS_DEPTH,
+  MAX_MOVETIME_MS,
+  MAX_MULTI_PV,
+  MAX_SKILL_LEVEL,
+  MIN_ANALYSIS_DEPTH,
+  MIN_MOVETIME_MS,
+  PERSPECTIVE_NOTE,
+  asBoundedInt,
+  classifyMove,
+  isValidFen,
+  normaliseScore,
+  scoreToComparable,
+  skillLevelToApproxElo,
+  type AnalysisResult,
+  type EngineLine,
+  type EngineSettings,
+  type MoveReview,
+  type Score
+} from './chess-analysis'
+import type { AnalyseRequest } from './stockfish-engine'
 
 export const TOOL_NAMES = [
   'chess-get-board-state',
   'chess-make-move',
   'chess-wait-for-human-move',
+  'chess-analyze-position',
+  'chess-evaluate-move',
+  'chess-set-engine-strength',
   'chess-suggest-move',
   'chess-new-game'
 ] as const
@@ -45,6 +73,10 @@ type ChessWebMcpToolsOptions = {
   onSuggestion: (suggestions: CoachSuggestion[], note: string | null) => void
   subscribeToGameEvent: (listener: (event: GameEvent) => void) => () => void
   onWaitStatusChange: (status: WaitStatus) => void
+  analyse: (request: AnalyseRequest) => Promise<AnalysisResult>
+  engineSettingsRef: RefObject<EngineSettings>
+  updateEngineSettings: (next: Partial<EngineSettings>) => EngineSettings
+  onMoveReview: (review: MoveReview | null) => void
 }
 
 function agentState(chess: Chess, humanColor: PlayerColor) {
@@ -80,6 +112,154 @@ function textContent(value: unknown) {
   }
 }
 
+function plainText(text: string) {
+  return { content: [{ type: 'text', text }] }
+}
+
+// Engine failures are ordinary here: the human may simply not have loaded the
+// 7 MB binary yet, or the browser may not run it. The agent gets a sentence it
+// can relay rather than a rejected tool call, and every other tool keeps working.
+function engineFailure(error: unknown) {
+  const detail =
+    error instanceof Error ? error.message : 'The chess engine is unavailable.'
+  return plainText(
+    `Engine unavailable: ${detail} The board, move and coaching tools still work without it.`
+  )
+}
+
+// Flattens an engine line into the shape the agent consumes, with from/to/promotion
+// broken out so a recommendation can be passed straight to chess-make-move.
+function describeLine(line: EngineLine) {
+  return {
+    rank: line.rank,
+    san: line.san,
+    uci: line.uci,
+    from: line.from,
+    to: line.to,
+    promotion: line.promotion,
+    display: line.score.display,
+    cpWhite: line.score.cpWhite,
+    mateInWhite: line.score.mateInWhite,
+    pvSan: line.pvSan
+  }
+}
+
+function describeScore(score: Score) {
+  return {
+    display: score.display,
+    cpWhite: score.cpWhite,
+    mateInWhite: score.mateInWhite
+  }
+}
+
+// A terminal position has no search to run: `go` would return `bestmove (none)`
+// with no info lines, so the score is derived from the outcome instead.
+function terminalScore(board: Chess): Score | null {
+  if (board.isCheckmate()) {
+    // The side to move is mated, so the winner is the other side.
+    const winner = opponentColor(board.turn())
+    return normaliseScore({ cp: null, mateIn: 0 }, winner)
+  }
+  if (board.isGameOver()) return normaliseScore({ cp: 0, mateIn: null }, 'w')
+  return null
+}
+
+type PositionEvaluation = { score: Score; best: EngineLine | null }
+
+// Evaluates one position, short-circuiting when the game has already ended
+// there so callers never have to special-case checkmate themselves.
+async function evaluatePosition(
+  analyse: (request: AnalyseRequest) => Promise<AnalysisResult>,
+  fen: string,
+  depth: number,
+  signal?: AbortSignal
+): Promise<PositionEvaluation> {
+  const board = new Chess(fen)
+  const terminal = terminalScore(board)
+  if (terminal) return { score: terminal, best: null }
+
+  const result = await analyse({ fen, depth, multiPv: 1, signal })
+  const best = result.lines[0] ?? null
+  return {
+    score: best
+      ? best.score
+      : normaliseScore({ cp: 0, mateIn: null }, result.turn),
+    best
+  }
+}
+
+// Resolves the move a review should be about: an explicit from/to, an explicit
+// SAN, or — with no arguments at all — the move that was just played.
+type ReviewTarget = {
+  fenBefore: string
+  from: string
+  to: string
+  promotion: PromotionPiece | null
+  historyIndex: number | null
+}
+
+function resolveReviewTarget(
+  chess: Chess,
+  input: {
+    from?: unknown
+    to?: unknown
+    promotion?: unknown
+    san?: unknown
+    fen?: unknown
+  }
+): ReviewTarget | string {
+  const explicitFen = typeof input.fen === 'string' ? input.fen : null
+  if (explicitFen && !isValidFen(explicitFen)) {
+    return `Not a valid FEN: ${explicitFen}`
+  }
+
+  const hasSquares =
+    typeof input.from === 'string' && typeof input.to === 'string'
+  const hasSan = typeof input.san === 'string' && input.san.trim().length > 0
+
+  if (!hasSquares && !hasSan) {
+    const history = chess.history({ verbose: true })
+    const last = history.at(-1)
+    if (!last) {
+      return 'No move has been played yet, so there is nothing to review. Pass from/to or san to evaluate a hypothetical move.'
+    }
+    return {
+      fenBefore: last.before,
+      from: last.from,
+      to: last.to,
+      promotion: (last.promotion as PromotionPiece | undefined) ?? null,
+      historyIndex: history.length - 1
+    }
+  }
+
+  const fenBefore = explicitFen ?? chess.fen()
+
+  if (hasSan) {
+    // Let chess.js resolve the SAN against the position it was played in.
+    const board = new Chess(fenBefore)
+    try {
+      const move = board.move(String(input.san))
+      return {
+        fenBefore,
+        from: move.from,
+        to: move.to,
+        promotion: (move.promotion as PromotionPiece | undefined) ?? null,
+        historyIndex: null
+      }
+    } catch {
+      return `"${String(input.san)}" is not a legal move in that position.`
+    }
+  }
+
+  return {
+    fenBefore,
+    from: String(input.from),
+    to: String(input.to),
+    promotion: asPromotion(input.promotion) ?? null,
+    historyIndex: null
+  }
+}
+
 // Registers the WebMCP tools an agent uses to read the board, move, coach, and reset the game.
 // Kept separate from the component so ChessGame only has to deal with UI + local interaction state.
 export function useChessWebMcpTools({
@@ -90,7 +270,11 @@ export function useChessWebMcpTools({
   onAgentMove,
   onSuggestion,
   subscribeToGameEvent,
-  onWaitStatusChange
+  onWaitStatusChange,
+  analyse,
+  engineSettingsRef,
+  updateEngineSettings,
+  onMoveReview
 }: ChessWebMcpToolsOptions): SupportStatus {
   const [status, setStatus] = useState<SupportStatus>('checking')
 
@@ -295,8 +479,342 @@ export function useChessWebMcpTools({
 
         await document.modelContext.registerTool(
           {
+            name: 'chess-analyze-position',
+            description:
+              'Runs the Stockfish engine on a position and returns its best moves with evaluations and principal variations. ' +
+              'Use this before recommending or playing a move — legal moves from chess-get-board-state say nothing about whether a move is good. ' +
+              "Scores in `display`, `cpWhite` and `mateInWhite` are from White's perspective, where positive favours White. " +
+              'Each line includes from/to/promotion so it can be passed straight to chess-make-move. ' +
+              'The first call downloads roughly 7 MB of engine and takes a few seconds; later calls are fast.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                fen: {
+                  type: 'string',
+                  description:
+                    'Position to analyse. Defaults to the current game position.'
+                },
+                depth: {
+                  type: 'number',
+                  description: `Search depth, ${MIN_ANALYSIS_DEPTH}-${MAX_ANALYSIS_DEPTH}. Defaults to ${DEFAULT_ANALYSIS_DEPTH}. Deeper is stronger and slower.`
+                },
+                multiPv: {
+                  type: 'number',
+                  description: `How many candidate lines to return, 1-${MAX_MULTI_PV}. Defaults to ${DEFAULT_MULTI_PV}.`
+                },
+                movetimeMs: {
+                  type: 'number',
+                  description: `Hard time budget in milliseconds, ${MIN_MOVETIME_MS}-${MAX_MOVETIME_MS}. Overrides depth when given.`
+                },
+                purpose: {
+                  type: 'string',
+                  enum: ['coach', 'play'],
+                  description:
+                    "'coach' (default) always analyses at full strength, so advice given to the human is honest. " +
+                    "'play' analyses at the skill level set by chess-set-engine-strength, for choosing the agent's own move — use it so the agent can be a beatable opponent."
+                }
+              },
+              required: []
+            },
+            annotations: { readOnlyHint: true },
+            async execute(
+              { fen, depth, multiPv, movetimeMs, purpose },
+              options
+            ) {
+              const chess = chessGameRef.current
+              const targetFen = typeof fen === 'string' ? fen : chess.fen()
+              if (!isValidFen(targetFen)) {
+                return plainText(`Not a valid FEN: ${targetFen}`)
+              }
+
+              const board = new Chess(targetFen)
+              if (board.isGameOver()) {
+                return textContent({
+                  outcome: 'game-over',
+                  message:
+                    'That position is already finished, so there is nothing to search.',
+                  status: describeStatus(board),
+                  fen: targetFen
+                })
+              }
+
+              const forPlay = purpose === 'play'
+              const settings = engineSettingsRef.current
+              const request: AnalyseRequest = {
+                fen: targetFen,
+                depth: asBoundedInt(
+                  depth,
+                  MIN_ANALYSIS_DEPTH,
+                  MAX_ANALYSIS_DEPTH,
+                  forPlay ? settings.depth : DEFAULT_ANALYSIS_DEPTH
+                ),
+                multiPv: forPlay
+                  ? 1
+                  : asBoundedInt(multiPv, 1, MAX_MULTI_PV, DEFAULT_MULTI_PV),
+                // Full strength for coaching; the configured level only ever
+                // weakens the engine when it is picking the agent's own move.
+                skillLevel: forPlay ? settings.skillLevel : MAX_SKILL_LEVEL,
+                signal: options?.signal
+              }
+              if (movetimeMs !== undefined) {
+                request.movetimeMs = asBoundedInt(
+                  movetimeMs,
+                  MIN_MOVETIME_MS,
+                  MAX_MOVETIME_MS,
+                  settings.movetimeMs
+                )
+              }
+
+              try {
+                const result = await analyse(request)
+                const best = result.lines[0] ?? null
+                return textContent({
+                  fen: result.fen,
+                  turn: result.turn,
+                  turnName: colorName(result.turn),
+                  depthReached: result.depthReached,
+                  timeMs: result.timeMs,
+                  nodes: result.nodes,
+                  purpose: forPlay ? 'play' : 'coach',
+                  skillLevel: request.skillLevel,
+                  perspectiveNote: PERSPECTIVE_NOTE,
+                  evaluation: best ? describeScore(best.score) : null,
+                  lines: result.lines.map(describeLine),
+                  bestMove: best
+                    ? {
+                        san: best.san,
+                        uci: best.uci,
+                        from: best.from,
+                        to: best.to,
+                        promotion: best.promotion
+                      }
+                    : null
+                })
+              } catch (error) {
+                if (options?.signal?.aborted) throw error
+                return engineFailure(error)
+              }
+            }
+          },
+          { signal: controller.signal }
+        )
+
+        await document.modelContext.registerTool(
+          {
+            name: 'chess-evaluate-move',
+            description:
+              'Asks Stockfish how good a move was: the evaluation before and after it, how much it gave away in centipawns, a blunder/mistake/good classification, the move the engine preferred, and the line that refutes it. ' +
+              'Called with no arguments it reviews the move just played, which is the usual way to coach after a human moves. ' +
+              'Use the refutation line to explain the mistake in words rather than only quoting the number.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                from: { type: 'string', description: 'Source square, e.g. "e2".' },
+                to: {
+                  type: 'string',
+                  description: 'Destination square, e.g. "e4".'
+                },
+                promotion: {
+                  type: 'string',
+                  enum: ['q', 'r', 'b', 'n'],
+                  description: 'Promotion piece, if the move is a promotion.'
+                },
+                san: {
+                  type: 'string',
+                  description:
+                    'The move in algebraic notation, e.g. "Nf3". An alternative to from/to.'
+                },
+                fen: {
+                  type: 'string',
+                  description:
+                    'The position the move is played from. Defaults to the current position, or to the position before the last move when reviewing it.'
+                },
+                depth: {
+                  type: 'number',
+                  description: `Search depth, ${MIN_ANALYSIS_DEPTH}-${MAX_ANALYSIS_DEPTH}. Defaults to ${DEFAULT_REVIEW_DEPTH}.`
+                }
+              },
+              required: []
+            },
+            annotations: { readOnlyHint: true },
+            async execute({ from, to, promotion, san, fen, depth }, options) {
+              const chess = chessGameRef.current
+              const target = resolveReviewTarget(chess, {
+                from,
+                to,
+                promotion,
+                san,
+                fen
+              })
+              if (typeof target === 'string') return plainText(target)
+
+              const beforeBoard = new Chess(target.fenBefore)
+              const playedBy = beforeBoard.turn()
+              let played
+              try {
+                played = beforeBoard.move({
+                  from: target.from,
+                  to: target.to,
+                  promotion: target.promotion ?? 'q'
+                })
+              } catch {
+                return plainText(
+                  `${target.from}-${target.to} is not a legal move in that position.`
+                )
+              }
+              const fenAfter = beforeBoard.fen()
+              const searchDepth = asBoundedInt(
+                depth,
+                MIN_ANALYSIS_DEPTH,
+                MAX_ANALYSIS_DEPTH,
+                DEFAULT_REVIEW_DEPTH
+              )
+
+              try {
+                const before = await evaluatePosition(
+                  analyse,
+                  target.fenBefore,
+                  searchDepth,
+                  options?.signal
+                )
+                const after = await evaluatePosition(
+                  analyse,
+                  fenAfter,
+                  searchDepth,
+                  options?.signal
+                )
+
+                // Both evaluations arrive in White's frame; flip them into the
+                // mover's so "loss" means what it says regardless of colour.
+                const moverSign = playedBy === 'w' ? 1 : -1
+                const beforeForMover =
+                  scoreToComparable(before.score) * moverSign
+                const afterForMover = scoreToComparable(after.score) * moverSign
+                const centipawnLoss = Math.max(
+                  0,
+                  Math.round(beforeForMover - afterForMover)
+                )
+
+                const hadMate =
+                  before.score.mateInWhite !== null &&
+                  before.score.mateInWhite * moverSign > 0
+                const keptMate =
+                  after.score.mateInWhite !== null &&
+                  after.score.mateInWhite * moverSign >= 0
+                const nowLosingToMate =
+                  after.score.mateInWhite !== null &&
+                  after.score.mateInWhite * moverSign < 0
+                const wasLosingToMate =
+                  before.score.mateInWhite !== null &&
+                  before.score.mateInWhite * moverSign < 0
+
+                const classification = classifyMove(centipawnLoss, {
+                  lostForcedMate: hadMate && !keptMate,
+                  allowedMate: nowLosingToMate && !wasLosingToMate
+                })
+
+                const wasEngineChoice = before.best?.uci === played.lan
+                const review: MoveReview = {
+                  moveSan: played.san,
+                  moveUci: played.lan,
+                  playedBy,
+                  classification,
+                  centipawnLoss,
+                  historyIndex: target.historyIndex
+                }
+                onMoveReview(review)
+
+                return textContent({
+                  move: {
+                    san: played.san,
+                    uci: played.lan,
+                    from: played.from,
+                    to: played.to
+                  },
+                  playedBy,
+                  playedByName: colorName(playedBy),
+                  reviewedLastMove: target.historyIndex !== null,
+                  depth: searchDepth,
+                  perspectiveNote: PERSPECTIVE_NOTE,
+                  evalBefore: describeScore(before.score),
+                  evalAfter: describeScore(after.score),
+                  centipawnLoss,
+                  classification,
+                  classificationNote: CLASSIFICATION_NOTE,
+                  wasEngineChoice,
+                  engineBest: before.best
+                    ? {
+                        san: before.best.san,
+                        uci: before.best.uci,
+                        from: before.best.from,
+                        to: before.best.to,
+                        promotion: before.best.promotion,
+                        pvSan: before.best.pvSan
+                      }
+                    : null,
+                  // The best continuation from the resulting position is exactly
+                  // the punishment, which is the part worth explaining.
+                  refutationPvSan: after.best?.pvSan ?? []
+                })
+              } catch (error) {
+                if (options?.signal?.aborted) throw error
+                return engineFailure(error)
+              }
+            }
+          },
+          { signal: controller.signal }
+        )
+
+        await document.modelContext.registerTool(
+          {
+            name: 'chess-set-engine-strength',
+            description:
+              "Sets how strong the engine plays when it picks the agent's own moves, so the agent can be a beatable opponent. " +
+              'Only affects chess-analyze-position calls made with purpose "play"; coaching analysis stays at full strength so advice to the human is never deliberately weakened.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                skillLevel: {
+                  type: 'number',
+                  description: `Stockfish Skill Level, 0-${MAX_SKILL_LEVEL}. 0 plays very badly, ${MAX_SKILL_LEVEL} is full strength.`
+                },
+                depth: {
+                  type: 'number',
+                  description: `Default search depth for the agent's own moves, ${MIN_ANALYSIS_DEPTH}-${MAX_ANALYSIS_DEPTH}.`
+                },
+                movetimeMs: {
+                  type: 'number',
+                  description: `Default time budget per search in milliseconds, ${MIN_MOVETIME_MS}-${MAX_MOVETIME_MS}.`
+                }
+              },
+              required: []
+            },
+            execute({ skillLevel, depth, movetimeMs }) {
+              const next = updateEngineSettings({
+                skillLevel:
+                  skillLevel === undefined ? undefined : Number(skillLevel),
+                depth: depth === undefined ? undefined : Number(depth),
+                movetimeMs:
+                  movetimeMs === undefined ? undefined : Number(movetimeMs)
+              })
+              return textContent({
+                outcome: 'settings-updated',
+                settings: next,
+                approximateStrength: skillLevelToApproxElo(next.skillLevel),
+                strengthNote:
+                  'Skill Level is not calibrated to Elo, so the rating band is a rough guide only.'
+              })
+            }
+          },
+          { signal: controller.signal }
+        )
+
+        await document.modelContext.registerTool(
+          {
             name: 'chess-suggest-move',
-            description: `Coaches the human by drawing up to ${MAX_SUGGESTED_MOVES} colored arrows for candidate moves, each with an optional reason, plus an overall note — without making a move or changing the game state.`,
+            description:
+              `Coaches the human by drawing up to ${MAX_SUGGESTED_MOVES} colored arrows for candidate moves, each with an optional reason and evaluation, plus an overall note — without making a move or changing the game state. ` +
+              'Get the candidates from chess-analyze-position first: this tool only checks that a move is legal, not that it is any good.',
             inputSchema: {
               type: 'object',
               properties: {
@@ -318,6 +836,11 @@ export function useChessWebMcpTools({
                       reason: {
                         type: 'string',
                         description: 'Why this move is worth considering.'
+                      },
+                      evalText: {
+                        type: 'string',
+                        description:
+                          'Engine evaluation to show beside the arrow, e.g. "+0.34" or "M3". Use the `display` value from chess-analyze-position.'
                       }
                     },
                     required: ['from', 'to']
@@ -346,6 +869,10 @@ export function useChessWebMcpTools({
                 const to = String(record?.to ?? '')
                 const reason =
                   typeof record?.reason === 'string' ? record.reason : undefined
+                const evalText =
+                  typeof record?.evalText === 'string'
+                    ? record.evalText
+                    : undefined
                 const isLegal = legalMoves.some(
                   (move) => move.from === from && move.to === to
                 )
@@ -354,6 +881,7 @@ export function useChessWebMcpTools({
                     from,
                     to,
                     reason,
+                    evalText,
                     color: ARROW_PALETTE[index % ARROW_PALETTE.length]
                   })
                 } else {
@@ -443,7 +971,11 @@ export function useChessWebMcpTools({
     onAgentMove,
     onSuggestion,
     subscribeToGameEvent,
-    onWaitStatusChange
+    onWaitStatusChange,
+    analyse,
+    engineSettingsRef,
+    updateEngineSettings,
+    onMoveReview
   ])
 
   return status
