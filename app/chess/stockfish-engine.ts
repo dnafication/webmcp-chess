@@ -61,6 +61,7 @@ type PendingSearch = {
 // rather than assumed.
 export class StockfishEngine {
   private worker: Worker | null = null
+  private progressPort: MessagePort | null = null
   private initPromise: Promise<void> | null = null
   private search: PendingSearch | null = null
   /** Serialises every request onto a single chain. */
@@ -122,9 +123,14 @@ export class StockfishEngine {
       new EngineUnavailableError('The chess engine worker crashed.')
     )
 
-    // Opt in to download-progress messages before anything else, so the 7 MB
-    // fetch can be reported instead of looking like a hang.
-    this.send('setoption name CanOutputEngineDownloadProgress value true')
+    // The glue script never reports WASM download progress over its regular
+    // message stream. It only does so on a MessagePort handed to it via a
+    // `{ progressPort }` message, and the fetch starts as soon as the worker
+    // script runs, so this must be wired up before anything else.
+    const progressChannel = new MessageChannel()
+    this.progressPort = progressChannel.port1
+    this.progressPort.onmessage = (event) => this.handleProgressMessage(event.data)
+    worker.postMessage({ progressPort: progressChannel.port2 }, [progressChannel.port2])
 
     // The first handshake also covers downloading and instantiating the WASM,
     // so it gets a generous budget compared with a search.
@@ -167,18 +173,21 @@ export class StockfishEngine {
     this.worker?.postMessage(command)
   }
 
-  // Worker payloads are UCI strings, except for the download-progress objects
-  // the glue script emits during the initial WASM fetch.
-  private handleMessage(data: unknown) {
-    if (typeof data !== 'string') {
-      const percent = (data as { percent?: unknown } | null)?.percent
-      if (typeof percent === 'number') {
-        for (const listener of this.progressListeners) {
-          listener({ percent: Math.max(0, Math.min(100, percent)) })
-        }
-      }
-      return
+  // The glue script reports `percent` as a 0-1 fraction (bytesLoaded /
+  // bytesTotal), not a 0-100 percentage.
+  private handleProgressMessage(data: unknown) {
+    const fraction = (data as { percent?: unknown } | null)?.percent
+    if (typeof fraction !== 'number') return
+    const percent = Math.max(0, Math.min(100, fraction * 100))
+    for (const listener of this.progressListeners) {
+      listener({ percent })
     }
+  }
+
+  // Download-progress objects arrive on their own port (see startWorker), so
+  // every message on the worker's regular stream is a UCI string.
+  private handleMessage(data: unknown) {
+    if (typeof data !== 'string') return
 
     const line = data.trim()
     if (line.length === 0) return
@@ -382,6 +391,8 @@ export class StockfishEngine {
   }
 
   private teardownWorker() {
+    this.progressPort?.close()
+    this.progressPort = null
     if (!this.worker) return
     this.worker.onmessage = null
     this.worker.onerror = null
