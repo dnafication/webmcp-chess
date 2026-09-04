@@ -21,6 +21,8 @@ export type CoachSuggestion = {
   from: string
   to: string
   reason?: string
+  // Engine evaluation for this move, e.g. "+0.34" or "M3", shown beside the arrow's entry.
+  evalText?: string
   color: string
 }
 

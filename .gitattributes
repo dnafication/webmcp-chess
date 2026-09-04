@@ -1,0 +1,5 @@
+# Vendored Stockfish build artefacts. Git must not touch line endings here:
+# the SHA-256 checksums recorded in public/stockfish/PROVENANCE.md are taken
+# from the upstream files byte for byte, and any normalisation would break
+# them. See that file for provenance.
+public/stockfish/** -text

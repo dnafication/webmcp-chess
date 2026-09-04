@@ -1,3 +1,7 @@
 ignoredBuiltDependencies:
   - sharp
   - unrs-resolver
+
+# esbuild ships a prebuilt binary that vitest needs at run time.
+onlyBuiltDependencies:
+  - esbuild
