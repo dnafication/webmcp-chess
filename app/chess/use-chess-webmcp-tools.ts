@@ -10,6 +10,7 @@ import {
   asPromotion,
   colorName,
   describeStatus,
+  materialSummaryOf,
   opponentColor,
   type CoachSuggestion,
   type MoveResult,
@@ -48,6 +49,7 @@ type ChessWebMcpToolsOptions = {
 
 function agentState(chess: Chess, humanColor: PlayerColor) {
   const agentColor = opponentColor(humanColor)
+  const material = materialSummaryOf(chess)
   return {
     fen: chess.fen(),
     turn: chess.turn(),
@@ -61,6 +63,9 @@ function agentState(chess: Chess, humanColor: PlayerColor) {
     isDraw: chess.isDraw(),
     isGameOver: chess.isGameOver(),
     status: describeStatus(chess),
+    capturedByWhite: material.capturedByWhite,
+    capturedByBlack: material.capturedByBlack,
+    materialAdvantage: material.advantage, // positive = White ahead, negative = Black ahead
     nextAction: chess.isGameOver()
       ? 'game-over'
       : chess.turn() === agentColor
@@ -106,7 +111,7 @@ export function useChessWebMcpTools({
           {
             name: 'chess-get-board-state',
             description:
-              'Returns the current chess position (FEN), whose turn it is, which color the human and the agent are playing, legal moves, move history, and game-over status.',
+              'Returns the current chess position (FEN), whose turn it is, which color the human and the agent are playing, legal moves, move history, game-over status, captured pieces for each side, and the net material advantage (materialAdvantage: positive favours White, negative favours Black, 0 when level).',
             inputSchema: { type: 'object', properties: {}, required: [] },
             annotations: { readOnlyHint: true },
             execute() {
