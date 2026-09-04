@@ -1,4 +1,4 @@
-import { Chess } from 'chess.js'
+import { Chess, type PieceSymbol } from 'chess.js'
 
 export type SupportStatus = 'checking' | 'ready' | 'unsupported' | 'error'
 export type PlayerColor = 'w' | 'b'
@@ -8,6 +8,14 @@ export type MoveResult =
   | { ok: true; san: string }
   | { ok: false; reason: string }
 export type StoredState = { pgn: string; humanColor: PlayerColor }
+export type CapturedPiece = Exclude<PieceSymbol, 'k'>
+export type MaterialSummary = {
+  // Pieces each side has captured, ordered by descending value.
+  capturedByWhite: CapturedPiece[]
+  capturedByBlack: CapturedPiece[]
+  // Net material on the board, from White's perspective. 0 when level.
+  advantage: number
+}
 export type BoardSnapshot = {
   fen: string
   history: string[]
@@ -15,6 +23,7 @@ export type BoardSnapshot = {
   checkSquare: string | null
   turn: PlayerColor
   isGameOver: boolean
+  material: MaterialSummary
 }
 // A coached move suggestion drawn as a colored arrow, with an optional reason shown in the panel below the board.
 export type CoachSuggestion = {
@@ -68,6 +77,54 @@ export function findCheckedKingSquare(chess: Chess): string | null {
   return null
 }
 
+export const PIECE_VALUES: Record<CapturedPiece, number> = {
+  p: 1,
+  n: 3,
+  b: 3,
+  r: 5,
+  q: 9
+}
+
+// Outline for White, filled for Black, so the two sides read apart at text size.
+export const PIECE_GLYPHS: Record<PlayerColor, Record<CapturedPiece, string>> = {
+  w: { p: '♙', n: '♘', b: '♗', r: '♖', q: '♕' },
+  b: { p: '♟', n: '♞', b: '♝', r: '♜', q: '♛' }
+}
+
+// Captures (for the strips) and net material on the board (for the +N figure) come from two
+// different sources — the board total is the only one that reflects promotions correctly.
+export function materialSummaryOf(chess: Chess): MaterialSummary {
+  const capturedByWhite: CapturedPiece[] = []
+  const capturedByBlack: CapturedPiece[] = []
+  for (const move of chess.history({ verbose: true })) {
+    if (!move.captured) continue
+    const captured = move.captured as CapturedPiece
+    if (move.color === 'w') capturedByWhite.push(captured)
+    else capturedByBlack.push(captured)
+  }
+  const byValueDescending = (a: CapturedPiece, b: CapturedPiece) =>
+    PIECE_VALUES[b] - PIECE_VALUES[a]
+  capturedByWhite.sort(byValueDescending)
+  capturedByBlack.sort(byValueDescending)
+
+  let whiteTotal = 0
+  let blackTotal = 0
+  for (const row of chess.board()) {
+    for (const cell of row) {
+      if (!cell || cell.type === 'k') continue
+      const value = PIECE_VALUES[cell.type as CapturedPiece]
+      if (cell.color === 'w') whiteTotal += value
+      else blackTotal += value
+    }
+  }
+
+  return {
+    capturedByWhite,
+    capturedByBlack,
+    advantage: whiteTotal - blackTotal
+  }
+}
+
 // Captured once per mutation (never read from render) so render stays pure.
 export function snapshotOf(chess: Chess): BoardSnapshot {
   return {
@@ -76,7 +133,8 @@ export function snapshotOf(chess: Chess): BoardSnapshot {
     statusText: describeStatus(chess),
     checkSquare: findCheckedKingSquare(chess),
     turn: chess.turn(),
-    isGameOver: chess.isGameOver()
+    isGameOver: chess.isGameOver(),
+    material: materialSummaryOf(chess)
   }
 }
 

@@ -21,6 +21,7 @@ import {
   type SquareHandlerArgs
 } from 'react-chessboard'
 import { boardThemeOptions } from './chess-board-theme'
+import CapturedPieces from './captured-pieces'
 import {
   asPlayerColor,
   createGame,
@@ -547,6 +548,14 @@ export default function ChessGame() {
   const reviewFor = (halfMoveIndex: number) =>
     moveReview?.historyIndex === halfMoveIndex ? moveReview : null
 
+  // The +N shown for a side is null unless it's actually ahead — Lichess-style, nothing at level.
+  function advantageFor(color: PlayerColor): number | null {
+    const { advantage } = snapshot.material
+    if (color === 'w') return advantage > 0 ? advantage : null
+    return advantage < 0 ? -advantage : null
+  }
+  const topStripColor = opponentColor(humanColor)
+
   const historyPairs: { white: string; black?: string }[] = []
   for (let i = 0; i < snapshot.history.length; i += 2) {
     historyPairs.push({
@@ -634,42 +643,62 @@ export default function ChessGame() {
           )}
         </div>
 
-        <div className="mx-auto flex w-[min(100%,80vh)] items-stretch gap-2">
-          <EvalBar
-            score={currentEvalScore}
-            whiteAtBottom={humanColor === 'w'}
+        <div className="mx-auto flex w-[min(100%,80vh)] flex-col gap-2">
+          <CapturedPieces
+            color={topStripColor}
+            pieces={
+              topStripColor === 'w'
+                ? snapshot.material.capturedByWhite
+                : snapshot.material.capturedByBlack
+            }
+            advantage={advantageFor(topStripColor)}
           />
-          <div className="relative aspect-square min-w-0 flex-1 overflow-hidden rounded-lg">
-          <Chessboard options={boardOptions} />
-          {pendingPromotion && (
-            <div className="absolute inset-0 flex items-center justify-center bg-white/90 p-4 dark:bg-zinc-950/90">
-              <div className="flex flex-col items-center gap-4 rounded-lg border border-black/10 bg-white p-5 shadow-xl dark:border-white/10 dark:bg-zinc-900">
-                <p className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
-                  Promote pawn to
-                </p>
-                <div className="flex gap-2">
-                  {(['q', 'r', 'b', 'n'] as const).map((piece) => (
+          <div className="flex items-stretch gap-2">
+            <EvalBar
+              score={currentEvalScore}
+              whiteAtBottom={humanColor === 'w'}
+            />
+            <div className="relative aspect-square min-w-0 flex-1 overflow-hidden rounded-lg">
+              <Chessboard options={boardOptions} />
+              {pendingPromotion && (
+                <div className="absolute inset-0 flex items-center justify-center bg-white/90 p-4 dark:bg-zinc-950/90">
+                  <div className="flex flex-col items-center gap-4 rounded-lg border border-black/10 bg-white p-5 shadow-xl dark:border-white/10 dark:bg-zinc-900">
+                    <p className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
+                      Promote pawn to
+                    </p>
+                    <div className="flex gap-2">
+                      {(['q', 'r', 'b', 'n'] as const).map((piece) => (
+                        <button
+                          key={piece}
+                          type="button"
+                          onClick={() => handlePromotionPick(piece)}
+                          className="h-10 min-w-10 rounded-md border border-black/15 px-3 text-sm font-semibold uppercase text-zinc-950 transition-colors hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-700 dark:border-white/15 dark:text-zinc-50 dark:hover:bg-zinc-800"
+                        >
+                          {piece}
+                        </button>
+                      ))}
+                    </div>
                     <button
-                      key={piece}
                       type="button"
-                      onClick={() => handlePromotionPick(piece)}
-                      className="h-10 min-w-10 rounded-md border border-black/15 px-3 text-sm font-semibold uppercase text-zinc-950 transition-colors hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-700 dark:border-white/15 dark:text-zinc-50 dark:hover:bg-zinc-800"
+                      onClick={() => setPendingPromotion(null)}
+                      className="text-xs font-medium text-zinc-500 underline underline-offset-4 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-50"
                     >
-                      {piece}
+                      Cancel
                     </button>
-                  ))}
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setPendingPromotion(null)}
-                  className="text-xs font-medium text-zinc-500 underline underline-offset-4 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-50"
-                >
-                  Cancel
-                </button>
-              </div>
+              )}
             </div>
-          )}
           </div>
+          <CapturedPieces
+            color={humanColor}
+            pieces={
+              humanColor === 'w'
+                ? snapshot.material.capturedByWhite
+                : snapshot.material.capturedByBlack
+            }
+            advantage={advantageFor(humanColor)}
+          />
         </div>
       </section>
 
